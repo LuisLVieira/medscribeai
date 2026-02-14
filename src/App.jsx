@@ -41,6 +41,7 @@ export default function App() {
 
   const [currentPatientId, setCurrentPatientId] = useState('1');
   const [recording, setRecording] = useState(false);
+  const [isStartingRecording, setIsStartingRecording] = useState(false);
   const [statusText, setStatusText] = useState('Idle');
   const [errorText, setErrorText] = useState('');
   const [downloadProgress, setDownloadProgress] = useState(null);
@@ -180,6 +181,7 @@ export default function App() {
     }
 
     try {
+      setIsStartingRecording(true);
       setErrorText('');
       setStatusText('Starting microphone...');
       setDownloadProgress(null);
@@ -196,6 +198,8 @@ export default function App() {
     } catch (err) {
       setErrorText(String(err));
       setStatusText('Failed to start');
+    } finally {
+      setIsStartingRecording(false);
     }
   };
 
@@ -215,6 +219,16 @@ export default function App() {
   };
 
   const currentPatient = patients.find((p) => p.id === currentPatientId);
+  const toggleRecording = () => {
+    if (isStartingRecording) {
+      return;
+    }
+    if (recording) {
+      stopRecording();
+      return;
+    }
+    startRecording();
+  };
 
   return (
     <div className="flex h-screen bg-white text-gray-900 font-sans">
@@ -230,35 +244,21 @@ export default function App() {
           <MainContent
             patient={currentPatient}
             onUpdatePatient={updatePatient}
+            recording={recording}
+            isStartingRecording={isStartingRecording}
+            onToggleRecording={toggleRecording}
+            modelChoice={modelChoice}
+            setModelChoice={setModelChoice}
+            vadSensitivity={vadSensitivity}
+            setVadSensitivity={setVadSensitivity}
+            autoSpeakerLabeling={autoSpeakerLabeling}
+            setAutoSpeakerLabeling={setAutoSpeakerLabeling}
             statusText={statusText}
             errorText={errorText}
             downloadProgress={downloadProgress}
           />
         )}
       </main>
-
-      {!recording && (
-        <button
-          onClick={startRecording}
-          className="fixed bottom-8 left-1/2 transform -translate-x-1/2 w-16 h-16 bg-red-500 hover:bg-red-600 text-white rounded-full shadow-lg flex items-center justify-center z-20 transition-colors"
-          aria-label="Start recording"
-        >
-          <MicrophoneIcon />
-        </button>
-      )}
-
-      {recording && (
-        <RecordingBar
-          onClose={stopRecording}
-          modelChoice={modelChoice}
-          setModelChoice={setModelChoice}
-          vadSensitivity={vadSensitivity}
-          setVadSensitivity={setVadSensitivity}
-          autoSpeakerLabeling={autoSpeakerLabeling}
-          setAutoSpeakerLabeling={setAutoSpeakerLabeling}
-          statusText={statusText}
-        />
-      )}
     </div>
   );
 }
@@ -303,7 +303,24 @@ function Sidebar({ patients, currentPatientId, onSelectPatient, onAddPatient }) 
   );
 }
 
-function MainContent({ patient, onUpdatePatient, statusText, errorText, downloadProgress }) {
+function MainContent({
+  patient,
+  onUpdatePatient,
+  recording,
+  isStartingRecording,
+  onToggleRecording,
+  modelChoice,
+  setModelChoice,
+  vadSensitivity,
+  setVadSensitivity,
+  autoSpeakerLabeling,
+  setAutoSpeakerLabeling,
+  statusText,
+  errorText,
+  downloadProgress
+}) {
+  const streamLines = getTranscriptStreamLines(patient);
+
   return (
     <div className="flex-1 flex flex-col">
       <header className="px-8 py-6 border-b border-gray-200">
@@ -327,75 +344,65 @@ function MainContent({ patient, onUpdatePatient, statusText, errorText, download
         </div>
       </header>
 
-      <div className="flex-1 flex divide-x divide-gray-200">
-        <div className="flex-1 flex flex-col">
-          <div className="px-6 py-4 border-b border-gray-200">
-            <h3 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">
-              Conversation Transcript
-            </h3>
-          </div>
-          <div className="flex-1 overflow-y-auto p-6">
-            {patient.segments && patient.segments.length > 0 ? (
-              <div className="space-y-3">
-                {patient.segments.map((segment, idx) => (
-                  <div
-                    key={`${segment.start_ms || idx}-${idx}`}
-                    className={`transcription-line ${speakerClassName(segment.speaker)}`}
-                  >
-                    <div className="transcription-meta">
-                      <span className="font-semibold">{segment.speaker || 'Unknown'}</span>
-                      <span className="ml-2 text-xs opacity-70">
-                        {formatClockFromMs(segment.start_ms)}
-                      </span>
-                    </div>
-                    <div>{segment.text}</div>
-                  </div>
-                ))}
-              </div>
-            ) : patient.transcript ? (
-              <div className="whitespace-pre-wrap text-gray-700 leading-relaxed">
-                {patient.transcript}
-              </div>
-            ) : (
-              <p className="text-gray-400 italic">
-                No transcript yet. Start recording to capture the conversation.
-              </p>
-            )}
-          </div>
-        </div>
+      <div className="px-6 py-3 border-b border-gray-200">
+        <TopTranscriptStreamBar
+          streamLines={streamLines}
+          recording={recording}
+          isStartingRecording={isStartingRecording}
+          onToggleRecording={onToggleRecording}
+          modelChoice={modelChoice}
+          setModelChoice={setModelChoice}
+          vadSensitivity={vadSensitivity}
+          setVadSensitivity={setVadSensitivity}
+          autoSpeakerLabeling={autoSpeakerLabeling}
+          setAutoSpeakerLabeling={setAutoSpeakerLabeling}
+          statusText={statusText}
+        />
+      </div>
 
-        <div className="flex-1 flex flex-col">
-          <div className="px-6 py-4 border-b border-gray-200">
-            <h3 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">SOAP Note</h3>
-          </div>
-          <div className="flex-1 overflow-y-auto p-6">
-            <div
-              contentEditable
-              suppressContentEditableWarning
-              onBlur={(e) => onUpdatePatient(patient.id, 'soap', e.currentTarget.innerHTML)}
-              className="prose prose-sm max-w-none outline-none focus:ring-2 focus:ring-blue-200 rounded p-2 min-h-full"
-              dangerouslySetInnerHTML={{ __html: patient.soap }}
-              aria-label="SOAP note editor"
-            />
-          </div>
+      <div className="flex-1 flex flex-col min-h-0">
+        <div className="px-6 py-4 border-b border-gray-200">
+          <h3 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">SOAP Note</h3>
+        </div>
+        <div className="flex-1 overflow-y-auto p-6">
+          <div
+            contentEditable
+            suppressContentEditableWarning
+            onBlur={(e) => onUpdatePatient(patient.id, 'soap', e.currentTarget.innerHTML)}
+            className="prose prose-sm max-w-none outline-none focus:ring-2 focus:ring-blue-200 rounded p-2 min-h-full"
+            dangerouslySetInnerHTML={{ __html: patient.soap }}
+            aria-label="SOAP note editor"
+          />
         </div>
       </div>
     </div>
   );
 }
 
-function speakerClassName(speaker) {
-  if (speaker === 'Doctor') {
-    return 'transcription-speaker-doctor';
+function getTranscriptStreamLines(patient) {
+  const segments = patient.segments || [];
+  if (segments.length > 0) {
+    return segments
+      .slice(-6)
+      .map((segment) => `${segment.speaker || 'Unknown'}: ${segment.text}`);
   }
-  if (speaker === 'Patient') {
-    return 'transcription-speaker-patient';
+
+  if (patient.transcript) {
+    return patient.transcript
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(-4);
   }
-  return 'transcription-speaker-unknown';
+
+  return [];
 }
 
-function RecordingBar({
-  onClose,
+function TopTranscriptStreamBar({
+  streamLines,
+  recording,
+  isStartingRecording,
+  onToggleRecording,
   modelChoice,
   setModelChoice,
   vadSensitivity,
@@ -404,86 +411,74 @@ function RecordingBar({
   setAutoSpeakerLabeling,
   statusText
 }) {
-  return (
-    <div className="fixed bottom-0 left-0 right-0 bg-gray-800 text-white shadow-2xl z-30 animate-slide-up">
-      <div className="flex flex-wrap items-center justify-between px-6 py-4 gap-4 min-h-20">
-        <div className="flex items-center gap-2">
-          <div className="text-sm font-medium mr-2">Recording</div>
-          <AudioVisualizer />
-          <div className="text-xs text-gray-300 ml-2">{statusText}</div>
-        </div>
+  const isActive = recording || isStartingRecording;
+  const lines = isActive
+    ? streamLines.length > 0
+      ? streamLines
+      : ['Waiting for speech...']
+    : ['Press record to start listening'];
 
-        <div className="flex items-center gap-3">
-          <label htmlFor="model-select" className="text-xs">Model</label>
+  return (
+    <section
+      className={`transcript-stream-bar ${isActive ? 'transcript-stream-bar-active' : ''}`}
+      role="status"
+      aria-live="polite"
+      aria-label="Live transcript listening feedback"
+    >
+      {isActive && <div className="transcript-stream-label">Listening</div>}
+      <div className="transcript-stream-viewport">
+        <div className={`transcript-stream-track ${isActive ? 'transcript-stream-track-active' : ''}`}>
+          {[...lines, ...lines].map((line, idx) => (
+            <div className="transcript-stream-line" key={`${line}-${idx}`}>
+              {line}
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="transcript-controls">
+        <div className="transcript-controls-selects">
+          <label htmlFor="top-model-select" className="text-xs">Model</label>
           <select
-            id="model-select"
+            id="top-model-select"
             value={modelChoice}
             onChange={(e) => setModelChoice(e.target.value)}
-            className="bg-gray-700 text-white px-3 py-2 rounded border border-gray-600 outline-none focus:border-blue-500 text-sm"
+            className="top-stream-select"
           >
             <option value="tiny.en">tiny.en</option>
             <option value="base.en">base.en</option>
           </select>
-
-          <label htmlFor="vad-select" className="text-xs">VAD</label>
+          <label htmlFor="top-vad-select" className="text-xs">VAD</label>
           <select
-            id="vad-select"
+            id="top-vad-select"
             value={vadSensitivity}
             onChange={(e) => setVadSensitivity(Number(e.target.value))}
-            className="bg-gray-700 text-white px-3 py-2 rounded border border-gray-600 outline-none focus:border-blue-500 text-sm"
+            className="top-stream-select"
           >
-            <option value={0}>0 (low)</option>
+            <option value={0}>0</option>
             <option value={1}>1</option>
             <option value={2}>2</option>
-            <option value={3}>3 (high)</option>
+            <option value={3}>3</option>
           </select>
-
-          <label className="text-xs flex items-center gap-2">
+          <label className="text-xs top-stream-checkbox">
             <input
               type="checkbox"
               checked={autoSpeakerLabeling}
               onChange={(e) => setAutoSpeakerLabeling(e.target.checked)}
             />
-            Auto label
+            Auto
           </label>
         </div>
-
-        <div className="flex items-center gap-4">
-          <button
-            onClick={onClose}
-            className="w-10 h-10 bg-red-600 hover:bg-red-700 rounded-full flex items-center justify-center transition-colors"
-            aria-label="Stop recording"
-          >
-            <StopIcon />
-          </button>
-          <button
-            onClick={onClose}
-            className="w-8 h-8 hover:bg-gray-700 rounded flex items-center justify-center transition-colors"
-            aria-label="Close recording bar"
-          >
-            <XIcon />
-          </button>
-        </div>
+        <button
+          onClick={onToggleRecording}
+          disabled={isStartingRecording}
+          className={`top-record-btn ${recording ? 'top-record-btn-stop' : 'top-record-btn-start'}`}
+          aria-label={recording ? 'Stop recording' : 'Start recording'}
+        >
+          {recording ? <StopIcon /> : <MicrophoneIcon />}
+        </button>
       </div>
-    </div>
-  );
-}
-
-function AudioVisualizer() {
-  return (
-    <div className="flex items-end gap-1 h-8">
-      {[...Array(10)].map((_, i) => (
-        <div
-          key={i}
-          className="w-1 bg-green-400 rounded-full animate-pulse"
-          style={{
-            height: `${20 + Math.random() * 80}%`,
-            animationDelay: `${i * 0.1}s`,
-            animationDuration: `${0.5 + Math.random() * 0.5}s`
-          }}
-        />
-      ))}
-    </div>
+      {isActive && <div className="transcript-stream-status">{statusText}</div>}
+    </section>
   );
 }
 
@@ -507,14 +502,6 @@ function StopIcon() {
   return (
     <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
       <rect x="6" y="6" width="12" height="12" />
-    </svg>
-  );
-}
-
-function XIcon() {
-  return (
-    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
     </svg>
   );
 }
