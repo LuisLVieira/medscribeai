@@ -57,3 +57,31 @@
   color: #4b5563;
   line-height: 1.625;
 }
+
+.transcription-line {
+  border-radius: 0.5rem;
+  padding: 0.625rem 0.75rem;
+  border: 1px solid transparent;
+}
+
+.transcription-meta {
+  margin-bottom: 0.15rem;
+}
+
+.transcription-speaker-doctor {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+  color: #1e3a8a;
+}
+
+.transcription-speaker-patient {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+  color: #166534;
+}
+
+.transcription-speaker-unknown {
+  background: #f8fafc;
+  border-color: #e2e8f0;
+  color: #334155;
+}
