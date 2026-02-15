@@ -2,25 +2,6 @@ import React, { useEffect, useRef, useState } from 'react';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
-function formatClockFromMs(ms) {
-  if (typeof ms !== 'number') {
-    const now = new Date();
-    return now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  }
-  const seconds = Math.max(0, Math.floor(ms / 1000));
-  const mm = String(Math.floor(seconds / 60)).padStart(2, '0');
-  const ss = String(seconds % 60).padStart(2, '0');
-  return `${mm}:${ss}`;
-}
-
-function appendTranscriptionLine(speaker, text, startMs, endMs) {
-  const speakerName = speaker || 'Unknown';
-  const startLabel = formatClockFromMs(startMs);
-  const endLabel = typeof endMs === 'number' ? formatClockFromMs(endMs) : null;
-  const stamp = endLabel ? `${startLabel}-${endLabel}` : startLabel;
-  return `[${stamp}] ${speakerName}: ${text}`;
-}
-
 export default function App() {
   const [patients, setPatients] = useState([
     {
@@ -47,7 +28,6 @@ export default function App() {
   const [downloadProgress, setDownloadProgress] = useState(null);
   const [modelChoice, setModelChoice] = useState('tiny.en');
   const [vadSensitivity, setVadSensitivity] = useState(2);
-  const [autoSpeakerLabeling, setAutoSpeakerLabeling] = useState(true);
 
   const currentPatientIdRef = useRef(currentPatientId);
 
@@ -66,7 +46,6 @@ export default function App() {
     const setup = async () => {
       const unlistenUpdate = await listen('transcription-update', (event) => {
         const segment = event.payload || {};
-        const speaker = segment.speaker || 'Unknown';
         const text = (segment.text || '').trim();
         if (!text) {
           return;
@@ -74,7 +53,6 @@ export default function App() {
 
         const startMs = typeof segment.start_ms === 'number' ? segment.start_ms : null;
         const endMs = typeof segment.end_ms === 'number' ? segment.end_ms : null;
-        const line = appendTranscriptionLine(speaker, text, startMs, endMs);
         const targetPatientId = currentPatientIdRef.current;
 
         setPatients((prev) =>
@@ -86,7 +64,6 @@ export default function App() {
             const last = prevSegments[prevSegments.length - 1];
             const isDuplicate =
               !!last &&
-              last.speaker === speaker &&
               last.text === text &&
               last.start_ms === startMs &&
               last.end_ms === endMs;
@@ -95,11 +72,10 @@ export default function App() {
             }
             return {
               ...patient,
-              transcript: patient.transcript ? `${patient.transcript}\n${line}` : line,
+              transcript: patient.transcript ? `${patient.transcript}\n${text}` : text,
               segments: [
                 ...prevSegments,
                 {
-                  speaker,
                   text,
                   start_ms: startMs,
                   end_ms: endMs
@@ -189,8 +165,7 @@ export default function App() {
         config: {
           model: modelChoice,
           vad_sensitivity: Number(vadSensitivity),
-          max_chunk_seconds: 14,
-          auto_speaker_labeling: autoSpeakerLabeling
+          max_chunk_seconds: 14
         }
       });
       setRecording(true);
@@ -251,8 +226,6 @@ export default function App() {
             setModelChoice={setModelChoice}
             vadSensitivity={vadSensitivity}
             setVadSensitivity={setVadSensitivity}
-            autoSpeakerLabeling={autoSpeakerLabeling}
-            setAutoSpeakerLabeling={setAutoSpeakerLabeling}
             statusText={statusText}
             errorText={errorText}
             downloadProgress={downloadProgress}
@@ -313,8 +286,6 @@ function MainContent({
   setModelChoice,
   vadSensitivity,
   setVadSensitivity,
-  autoSpeakerLabeling,
-  setAutoSpeakerLabeling,
   statusText,
   errorText,
   downloadProgress
@@ -354,8 +325,6 @@ function MainContent({
           setModelChoice={setModelChoice}
           vadSensitivity={vadSensitivity}
           setVadSensitivity={setVadSensitivity}
-          autoSpeakerLabeling={autoSpeakerLabeling}
-          setAutoSpeakerLabeling={setAutoSpeakerLabeling}
           statusText={statusText}
         />
       </div>
@@ -382,9 +351,7 @@ function MainContent({
 function getTranscriptStreamLines(patient) {
   const segments = patient.segments || [];
   if (segments.length > 0) {
-    return segments
-      .slice(-6)
-      .map((segment) => `${segment.speaker || 'Unknown'}: ${segment.text}`);
+    return segments.slice(-6).map((segment) => segment.text);
   }
 
   if (patient.transcript) {
@@ -407,8 +374,6 @@ function TopTranscriptStreamBar({
   setModelChoice,
   vadSensitivity,
   setVadSensitivity,
-  autoSpeakerLabeling,
-  setAutoSpeakerLabeling,
   statusText
 }) {
   const isActive = recording || isStartingRecording;
@@ -459,14 +424,6 @@ function TopTranscriptStreamBar({
             <option value={2}>2</option>
             <option value={3}>3</option>
           </select>
-          <label className="text-xs top-stream-checkbox">
-            <input
-              type="checkbox"
-              checked={autoSpeakerLabeling}
-              onChange={(e) => setAutoSpeakerLabeling(e.target.checked)}
-            />
-            Auto
-          </label>
         </div>
         <button
           onClick={onToggleRecording}

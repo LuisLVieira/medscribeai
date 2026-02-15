@@ -24,7 +24,6 @@ pub struct TranscriptionConfig {
     pub model: Option<String>,
     pub vad_sensitivity: Option<u8>,
     pub max_chunk_seconds: Option<f32>,
-    pub auto_speaker_labeling: Option<bool>,
 }
 
 impl Default for TranscriptionConfig {
@@ -33,7 +32,6 @@ impl Default for TranscriptionConfig {
             model: Some("tiny.en".to_string()),
             vad_sensitivity: Some(2),
             max_chunk_seconds: Some(14.0),
-            auto_speaker_labeling: Some(true),
         }
     }
 }
@@ -51,9 +49,6 @@ impl TranscriptionConfig {
                 }
                 if parsed.max_chunk_seconds.is_none() {
                     parsed.max_chunk_seconds = Some(14.0);
-                }
-                if parsed.auto_speaker_labeling.is_none() {
-                    parsed.auto_speaker_labeling = Some(true);
                 }
                 parsed
             }
@@ -75,15 +70,10 @@ impl TranscriptionConfig {
     fn vad_sensitivity(&self) -> u8 {
         self.vad_sensitivity.unwrap_or(2).clamp(0, 3)
     }
-
-    fn auto_speaker_labeling(&self) -> bool {
-        self.auto_speaker_labeling.unwrap_or(true)
-    }
 }
 
 #[derive(Debug, Serialize, Clone)]
 pub struct TranscriptionSegment {
-    pub speaker: String,
     pub text: String,
     pub start_ms: Option<u64>,
     pub end_ms: Option<u64>,
@@ -349,7 +339,6 @@ fn run_transcription_loop(
         config.max_chunk_seconds(),
         TARGET_SAMPLE_RATE,
     );
-    let mut speaker_tracker = SpeakerTracker::new(config.auto_speaker_labeling());
 
     while !stop_flag.load(Ordering::Relaxed) {
         match rx.recv_timeout(Duration::from_millis(120)) {
@@ -367,9 +356,7 @@ fn run_transcription_loop(
                             if text.is_empty() {
                                 continue;
                             }
-                            let speaker = speaker_tracker.next_speaker(seg.duration_seconds());
                             let payload = TranscriptionSegment {
-                                speaker,
                                 text,
                                 start_ms: Some(samples_to_ms(seg.start_sample, TARGET_SAMPLE_RATE)),
                                 end_ms: Some(samples_to_ms(seg.end_sample, TARGET_SAMPLE_RATE)),
@@ -589,12 +576,6 @@ struct SegmentCandidate {
     end_sample: usize,
 }
 
-impl SegmentCandidate {
-    fn duration_seconds(&self) -> f32 {
-        (self.samples.len() as f32) / TARGET_SAMPLE_RATE as f32
-    }
-}
-
 struct AudioChunker {
     frame_size: usize,
     max_chunk_samples: usize,
@@ -733,60 +714,4 @@ fn frame_rms(frame: &[f32]) -> f32 {
         sum += s * s;
     }
     (sum / frame.len() as f32).sqrt()
-}
-
-struct SpeakerTracker {
-    auto_label: bool,
-    current_is_doctor: bool,
-    initialized: bool,
-    current_speaker_streak_seconds: f32,
-}
-
-impl SpeakerTracker {
-    fn new(auto_label: bool) -> Self {
-        Self {
-            auto_label,
-            current_is_doctor: true,
-            initialized: false,
-            current_speaker_streak_seconds: 0.0,
-        }
-    }
-
-    fn next_speaker(&mut self, duration_seconds: f32) -> String {
-        if !self.auto_label {
-            return "Unknown".to_string();
-        }
-
-        if !self.initialized {
-            self.initialized = true;
-            self.current_is_doctor = duration_seconds >= 2.5;
-            self.current_speaker_streak_seconds = duration_seconds;
-            return if self.current_is_doctor {
-                "Doctor".to_string()
-            } else {
-                "Patient".to_string()
-            };
-        }
-
-        if duration_seconds < 1.4 {
-            self.current_speaker_streak_seconds += duration_seconds;
-            return if self.current_is_doctor {
-                "Doctor".to_string()
-            } else {
-                "Patient".to_string()
-            };
-        }
-
-        if duration_seconds >= 3.2 || self.current_speaker_streak_seconds >= 7.0 {
-            self.current_is_doctor = !self.current_is_doctor;
-            self.current_speaker_streak_seconds = duration_seconds;
-        } else {
-            self.current_speaker_streak_seconds += duration_seconds;
-        }
-
-        if self.current_is_doctor {
-            return "Doctor".to_string();
-        }
-        "Patient".to_string()
-    }
 }
