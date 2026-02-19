@@ -184,13 +184,42 @@ export default function App() {
       return;
     }
 
+    const targetPatientId = currentPatientIdRef.current;
+    const transcriptForSoap =
+      patients.find((patient) => patient.id === targetPatientId)?.transcript?.trim() || '';
+
     try {
       await invoke('stop_transcription');
     } catch (_err) {
       // no-op
     }
+
     setRecording(false);
-    setStatusText('Idle');
+    if (!transcriptForSoap) {
+      setStatusText('Idle');
+      return;
+    }
+
+    try {
+      setStatusText('Generating SOAP note...');
+      const soapText = await invoke('generate_soap_note', {
+        transcript: transcriptForSoap
+      });
+      setPatients((prev) =>
+        prev.map((patient) =>
+          patient.id === targetPatientId
+            ? {
+                ...patient,
+                soap: formatSoapTextAsHtml(String(soapText || ''))
+              }
+            : patient
+        )
+      );
+      setStatusText('Idle');
+    } catch (err) {
+      setErrorText(String(err));
+      setStatusText('SOAP note generation failed');
+    }
   };
 
   const currentPatient = patients.find((p) => p.id === currentPatientId);
@@ -437,6 +466,42 @@ function TopTranscriptStreamBar({
       {isActive && <div className="transcript-stream-status">{statusText}</div>}
     </section>
   );
+}
+
+function formatSoapTextAsHtml(text) {
+  const lines = text.split('\n');
+  const htmlParts = [];
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) {
+      continue;
+    }
+
+    const section = line.match(/^(Subjective|Objective|Assessment|Plan)\s*:?\s*$/i);
+    if (section) {
+      const title = section[1].charAt(0).toUpperCase() + section[1].slice(1).toLowerCase();
+      htmlParts.push(`<h3>${escapeHtml(title)}</h3>`);
+      continue;
+    }
+
+    htmlParts.push(`<p>${escapeHtml(line)}</p>`);
+  }
+
+  if (htmlParts.length === 0) {
+    return `<p>${escapeHtml(text.trim())}</p>`;
+  }
+
+  return htmlParts.join('\n');
+}
+
+function escapeHtml(value) {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
 }
 
 function MicrophoneIcon() {

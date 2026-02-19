@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -12,7 +13,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{path::BaseDirectory, AppHandle, Emitter, Manager};
 use thiserror::Error;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
@@ -196,6 +197,204 @@ pub async fn stop_transcription_command() -> Result<(), String> {
         .await
         .map_err(|err| format!("task join error: {err}"))?
         .map_err(|err| err.to_string())
+}
+
+pub async fn generate_soap_note_command(app: AppHandle, transcript: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || generate_soap_note(&app, &transcript))
+        .await
+        .map_err(|err| format!("task join error: {err}"))?
+}
+
+fn generate_soap_note(app: &AppHandle, transcript: &str) -> Result<String, String> {
+    let cleaned_transcript = transcript.trim();
+    if cleaned_transcript.is_empty() {
+        return Err("cannot generate SOAP note from an empty transcript".to_string());
+    }
+
+    let sidecar = resolve_sidecar_path(app)?;
+    let model = resolve_llm_model_path(app)?;
+
+    let prompt = format!(
+        "You are a medical scribe.\n\
+Generate a SOAP note from this doctor-patient conversation.\n\
+Keep it concise, medically accurate, and organized with these exact section headers:\n\
+Subjective\n\
+Objective\n\
+Assessment\n\
+Plan\n\
+Do not add extra sections.\n\
+Return only the SOAP note text with no preamble, no explanation, and no thinking process.\n\n\
+Conversation:\n\
+{cleaned_transcript}\n"
+    );
+
+    let output = Command::new(&sidecar)
+        .arg("-m")
+        .arg(&model)
+        .arg("-p")
+        .arg(prompt)
+        .arg("-st")
+        .arg("-n")
+        .arg("768")
+        .arg("-ngl")
+        .arg("0")
+        .arg("--temp")
+        .arg("0.2")
+        .arg("--reasoning-budget")
+        .arg("0")
+        .arg("--no-show-timings")
+        .arg("--no-display-prompt")
+        .arg("--simple-io")
+        .output()
+        .map_err(|err| format!("failed to run llama-cli sidecar: {err}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("llama-cli failed: {}", stderr.trim()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let soap_text = extract_soap_text(&stdout);
+
+    if soap_text.is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "llama-cli returned no output{}",
+            if stderr.trim().is_empty() {
+                "".to_string()
+            } else {
+                format!(" (stderr: {})", stderr.trim())
+            }
+        ));
+    }
+
+    Ok(soap_text)
+}
+
+fn resolve_sidecar_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(p) = app.path().resolve("binaries/llama-cli", BaseDirectory::Resource) {
+        candidates.push(p);
+    }
+    if let Ok(p) = std::env::current_dir() {
+        candidates.push(p.join("src-tauri").join("binaries").join("llama-cli"));
+        candidates.push(p.join("binaries").join("llama-cli"));
+    }
+
+    for path in candidates {
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+
+    Err("could not locate llama-cli sidecar binary".to_string())
+}
+
+fn resolve_llm_model_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(p) = app.path().resolve("models/model-Q4_K_M.gguf", BaseDirectory::Resource) {
+        candidates.push(p);
+    }
+    if let Ok(p) = std::env::current_dir() {
+        candidates.push(p.join("src-tauri").join("models").join("model-Q4_K_M.gguf"));
+        candidates.push(p.join("models").join("model-Q4_K_M.gguf"));
+    }
+
+    for path in candidates {
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+
+    Err("could not locate GGUF model file: model-Q4_K_M.gguf".to_string())
+}
+
+fn extract_soap_text(raw: &str) -> String {
+    let cleaned = remove_terminal_control_chars(raw);
+    let mut collected: Vec<String> = Vec::new();
+    let mut capturing = false;
+
+    for line in cleaned.lines() {
+        let trimmed = line.trim();
+        if trimmed.eq_ignore_ascii_case("exiting...") {
+            break;
+        }
+        if let Some(header) = soap_header_name(trimmed) {
+            capturing = true;
+            collected.push(format!("{header}:"));
+            continue;
+        }
+        if !capturing {
+            continue;
+        }
+        if trimmed.starts_with("[ Prompt:")
+            || trimmed.starts_with('>')
+            || trimmed.contains("llama_memory_breakdown_print:")
+        {
+            continue;
+        }
+        collected.push(trimmed.to_string());
+    }
+
+    let result = collected
+        .join("\n")
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+
+    if !result.is_empty() {
+        return result;
+    }
+
+    // Fallback: return non-empty lines with obvious CLI scaffolding removed.
+    cleaned
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| {
+            !line.starts_with("Loading model")
+                && !line.starts_with("available commands:")
+                && !line.starts_with("/exit")
+                && !line.starts_with("/regen")
+                && !line.starts_with("/clear")
+                && !line.starts_with("/read")
+                && !line.starts_with("build")
+                && !line.starts_with("model")
+                && !line.starts_with("modalities")
+                && !line.starts_with('>')
+                && !line.eq_ignore_ascii_case("Exiting...")
+                && !line.starts_with("[ Prompt:")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+fn remove_terminal_control_chars(input: &str) -> String {
+    input
+        .chars()
+        .filter(|ch| *ch == '\n' || *ch == '\t' || !ch.is_control())
+        .collect()
+}
+
+fn soap_header_name(line: &str) -> Option<&'static str> {
+    let normalized = line
+        .trim()
+        .trim_start_matches(|c: char| !c.is_ascii_alphabetic())
+        .trim_end_matches(|c: char| !c.is_ascii_alphabetic())
+        .to_ascii_lowercase();
+
+    match normalized.as_str() {
+        "subjective" => Some("Subjective"),
+        "objective" => Some("Objective"),
+        "assessment" => Some("Assessment"),
+        "plan" => Some("Plan"),
+        _ => None,
+    }
 }
 
 fn ensure_model_file(app: &AppHandle, model_key: &str) -> Result<PathBuf, TranscriptionError> {
