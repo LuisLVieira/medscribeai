@@ -26,3 +26,7 @@ dist-ssr
 # OpenSpec
 .codex
 .github
+
+# Binary sidecars and models
+src-tauri/binaries
+src-tauri/models
