@@ -1,51 +1,86 @@
-# Tauri + React
+# MedScribeAI
 
-This template should help get you started developing with Tauri and React in Vite.
+MedScribeAI is an experimental Tauri (Rust + React) desktop application that provides near real-time, local CPU medical conversation transcription and summarization into SOAP standard.
 
-## Recommended IDE Setup
+## Quick Start
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+- Install Rust toolchain (stable) and platform-specific build tools for Tauri.
+- Install Node.js (recommended 18+). Then from project root:
 
-## Local CPU Transcription (Whisper + Tauri)
+```bash
+npm install
+npm run dev    # start the frontend (vite)
+npm run tauri  # run the Tauri app (or `npm run tauri dev` depending on setup)
+```
 
-This app now includes local, CPU-only microphone transcription with near real-time updates:
+On first transcription run the app will download Whisper GGML models into the app data directory under `models/`.
 
-- Audio input from `cpal`
-- Chunking with lightweight energy-based VAD (CPU-friendly)
-- Whisper inference via `whisper-rs` with GGML models (`tiny.en` default, `base.en` optional)
-- Segment events emitted from Rust to frontend:
-  - `transcription-update`
-  - `transcription-error`
-  - `model-download-progress`
+## Project Layout
 
-### Installation Notes
+- `src/` — frontend React app (Vite)
+- `src-tauri/` — Rust/Tauri backend and native code
+- `models/` — (runtime) directory for downloaded GGML models
 
-1. Install Rust toolchain and platform build tools for Tauri.
-2. Run `npm install`.
-3. Run `npm run tauri dev`.
-4. On first transcription start, the model is downloaded automatically to app local data directory under `models/`.
+## Runtime Configuration
 
-### Runtime Config
+- `model`: `tiny.en` (default) or `base.en`
+- `vad_sensitivity`: `0-3` (higher = more aggressive)
+- `max_chunk_seconds`: `4-12`
+- `auto_speaker_labeling`: `true|false`
 
-Frontend starts transcription with:
+## Contributing
 
-- `model`: `tiny.en` or `base.en`
-- `vad_sensitivity`: `0-3` (higher = more aggressive speech detection)
-- `max_chunk_seconds`: clamped to `4-12`
-- `auto_speaker_labeling`: `true/false`
+We welcome contributions. To make collaboration smooth, follow these guidelines:
 
-### Expected CPU Performance
+- **Fork + Branch**: Fork the repository and create a branch named `feat/<short-description>` or `fix/<short-description>`.
+- **Issue First**: Open an issue describing the problem or feature before large changes. Use the issue to discuss design and scope.
+- **Small PRs**: Keep pull requests focused and small. Each PR should address one logical change with a clear description and testing notes.
+- **Commit Messages**: Use present-tense, short messages, e.g. `Add transcription-stop command`.
+- **Code Style**:
+  - Frontend: follow existing React code style and use Prettier if configured.
+  - Rust: run `cargo fmt` and follow idiomatic Rust.
+- **Tests**: Add unit tests where practical and include instructions to run them.
+- **Review**: Assign reviewers and request review using the repo's Pull Request workflow. Address feedback with follow-up commits.
 
-On typical laptops/desktops (Intel i5/i7 11th gen+ with ~16 GB RAM), expected segment latency is usually:
+## Developer Workflow
 
-- `tiny.en`: often around `1.5-3.5s`
-- `base.en`: often around `2.5-5s`
+1. Pull latest `main` and create a feature branch:
 
-Actual latency depends on microphone quality, CPU load, and chunk boundaries.
+```bash
+git checkout main
+git pull
+git checkout -b feat/your-feature
+```
 
-### Known Limitations
+2. Implement changes, run `cargo fmt` and `npm run build` if needed.
+3. Run the app locally with `npm run tauri dev` to validate end-to-end behavior.
+4. Push your branch and open a PR against `main`.
 
-- Speaker labels (`Doctor`/`Patient`) use simple alternating heuristics, not full diarization.
-- Medical terminology accuracy is limited with `tiny.en`/`base.en`.
-- VAD is intentionally simple for low CPU usage and may miss low-volume speech or include short noise bursts.
-- No GPU/Metal/CUDA/Vulkan acceleration; CPU-only path is used everywhere.
+## Running Locally — Rust
+
+From `src-tauri/` you can build the native parts with Cargo:
+
+```bash
+cd src-tauri
+cargo build
+# For a release build:
+cargo build --release
+```
+
+## Reporting Issues
+
+- Use GitHub Issues to report bugs or request enhancements. Include steps to reproduce, platform details (OS, Rust & Node versions), and relevant logs.
+
+## Code of Conduct
+
+Be respectful and constructive. If you'd like, I can add a contributor `CODE_OF_CONDUCT.md` and templates for issues/PRs.
+
+---
+
+If you want, I can now:
+
+- update other metadata (app icons, `tauri.conf.json` display name),
+- add PR/issue templates and a `CODE_OF_CONDUCT.md`, or
+- run a quick validation (e.g., `npm run build` or `cargo check`) locally.
+
+Tell me which next step you prefer.

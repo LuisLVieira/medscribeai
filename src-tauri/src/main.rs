@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    medgemma_scriber_lib::run()
+    medscribeai_lib::run()
 }
