@@ -28,5 +28,5 @@ dist-ssr
 .github
 
 # Binary sidecars and models
-src-tauri/binaries
-src-tauri/models
+src-tauri/binaries/llama-cli
+src-tauri/models/*.gguf
