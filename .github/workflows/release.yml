@@ -14,7 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-latest
+          - platform: macos-14
             args: --bundles app
             cmake_osx_deployment_target: '10.15'
             cflags: -mmacosx-version-min=10.15
