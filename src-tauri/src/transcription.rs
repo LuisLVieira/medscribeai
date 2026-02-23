@@ -460,25 +460,37 @@ Conversation:\n\
 }
 
 fn resolve_sidecar_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let binary_names: &[&str] = if cfg!(target_os = "windows") {
+        &["llama-cli.exe", "llama-cli"]
+    } else {
+        &["llama-cli"]
+    };
+
     let mut candidates: Vec<PathBuf> = Vec::new();
 
     if let Ok(resource_dir) = app.path().resource_dir() {
-        candidates.push(resource_dir.join("binaries").join("llama-cli"));
-        candidates.push(resource_dir.join("llama-cli"));
+        for binary_name in binary_names {
+            candidates.push(resource_dir.join("binaries").join(binary_name));
+            candidates.push(resource_dir.join(binary_name));
+        }
     }
 
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
-            candidates.push(exe_dir.join("llama-cli"));
-            candidates.push(exe_dir.join("binaries").join("llama-cli"));
-            candidates.push(exe_dir.join("../Resources").join("binaries").join("llama-cli"));
-            candidates.push(exe_dir.join("../Resources").join("llama-cli"));
+            for binary_name in binary_names {
+                candidates.push(exe_dir.join(binary_name));
+                candidates.push(exe_dir.join("binaries").join(binary_name));
+                candidates.push(exe_dir.join("../Resources").join("binaries").join(binary_name));
+                candidates.push(exe_dir.join("../Resources").join(binary_name));
+            }
         }
     }
 
     if let Ok(p) = std::env::current_dir() {
-        candidates.push(p.join("src-tauri").join("binaries").join("llama-cli"));
-        candidates.push(p.join("binaries").join("llama-cli"));
+        for binary_name in binary_names {
+            candidates.push(p.join("src-tauri").join("binaries").join(binary_name));
+            candidates.push(p.join("binaries").join(binary_name));
+        }
     }
 
     for path in candidates {

@@ -66,6 +66,37 @@ jobs:
         with:
           workspaces: ./src-tauri -> target
 
+      - name: Build llama-cli sidecar (Linux/macOS)
+        if: matrix.platform != 'windows-latest'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --depth 1 https://github.com/ggerganov/llama.cpp.git /tmp/llama.cpp
+          cmake -S /tmp/llama.cpp -B /tmp/llama.cpp/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DLLAMA_BUILD_TESTS=OFF
+          cmake --build /tmp/llama.cpp/build --target llama-cli --config Release -j 4
+          mkdir -p src-tauri/binaries
+          cp /tmp/llama.cpp/build/bin/llama-cli src-tauri/binaries/llama-cli
+          chmod +x src-tauri/binaries/llama-cli
+
+      - name: Build llama-cli sidecar (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/ggerganov/llama.cpp.git $env:TEMP/llama.cpp
+          cmake -S $env:TEMP/llama.cpp -B $env:TEMP/llama.cpp/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DLLAMA_BUILD_TESTS=OFF
+          cmake --build $env:TEMP/llama.cpp/build --target llama-cli --config Release
+          New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
+          if (Test-Path "$env:TEMP/llama.cpp/build/bin/Release/llama-cli.exe") {
+            Copy-Item "$env:TEMP/llama.cpp/build/bin/Release/llama-cli.exe" "src-tauri/binaries/llama-cli.exe" -Force
+          } elseif (Test-Path "$env:TEMP/llama.cpp/build/bin/llama-cli.exe") {
+            Copy-Item "$env:TEMP/llama.cpp/build/bin/llama-cli.exe" "src-tauri/binaries/llama-cli.exe" -Force
+          } else {
+            throw "llama-cli.exe not found in expected build output paths"
+          }
+
       - name: Build and publish Tauri bundles
         uses: tauri-apps/tauri-action@v0
         env:
