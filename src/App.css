@@ -337,46 +337,6 @@
   position: relative;
 }
 
-.transcript-stream-viewport::before,
-.transcript-stream-viewport::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  height: 0.5rem;
-  pointer-events: none;
-  z-index: 1;
-}
-
-.transcript-stream-viewport::before {
-  top: 0;
-  background: linear-gradient(180deg, #f8fafc 0%, rgba(248, 250, 252, 0) 100%);
-}
-
-.transcript-stream-viewport::after {
-  bottom: 0;
-  background: linear-gradient(0deg, #f8fafc 0%, rgba(248, 250, 252, 0) 100%);
-}
-
-.transcript-stream-bar-active .transcript-stream-viewport::before {
-  background: linear-gradient(180deg, #ecfeff 0%, rgba(236, 254, 255, 0) 100%);
-}
-
-.transcript-stream-bar-active .transcript-stream-viewport::after {
-  background: linear-gradient(0deg, #f0fdfa 0%, rgba(240, 253, 250, 0) 100%);
-}
-
-.transcript-stream-track {
-  display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
-  transform: translateY(0);
-}
-
-.transcript-stream-track-active {
-  animation: stream-vertical 3s linear infinite;
-}
-
 .transcript-stream-line {
   font-size: 0.87rem;
   color: #334155;
@@ -384,6 +344,15 @@
   overflow: hidden;
   text-overflow: ellipsis;
   line-height: 1.2;
+}
+
+.transcript-stream-single-line {
+  font-size: 0.87rem;
+  color: #334155;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.7rem;
 }
 
 .transcript-controls {
@@ -451,7 +420,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .transcript-stream-track-active {
-    animation: none;
+  .transcript-stream-single-line {
+    transition: none;
   }
 }

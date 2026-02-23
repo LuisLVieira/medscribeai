@@ -606,7 +606,7 @@ function MainContent({
   errorText,
   onOpenSetup
 }) {
-  const streamLines = getTranscriptStreamLines(patient);
+  const latestChunk = getLatestTranscriptChunk(patient);
 
   return (
     <div className="flex-1 flex flex-col">
@@ -633,7 +633,7 @@ function MainContent({
 
       <div className="px-6 py-3 border-b border-gray-200">
         <TopTranscriptStreamBar
-          streamLines={streamLines}
+          latestChunk={latestChunk}
           recording={recording}
           isStartingRecording={isStartingRecording}
           onToggleRecording={onToggleRecording}
@@ -687,25 +687,25 @@ function formatBytes(value) {
   return `${amount.toFixed(exp === 0 ? 0 : amount >= 10 ? 1 : 2)} ${units[exp]}`;
 }
 
-function getTranscriptStreamLines(patient) {
+function getLatestTranscriptChunk(patient) {
   const segments = patient.segments || [];
   if (segments.length > 0) {
-    return segments.slice(-6).map((segment) => segment.text);
+    return segments[segments.length - 1]?.text || '';
   }
 
   if (patient.transcript) {
-    return patient.transcript
+    const lines = patient.transcript
       .split('\n')
       .map((line) => line.trim())
-      .filter(Boolean)
-      .slice(-4);
+      .filter(Boolean);
+    return lines[lines.length - 1] || '';
   }
 
-  return [];
+  return '';
 }
 
 function TopTranscriptStreamBar({
-  streamLines,
+  latestChunk,
   recording,
   isStartingRecording,
   onToggleRecording,
@@ -714,11 +714,9 @@ function TopTranscriptStreamBar({
   statusText
 }) {
   const isActive = recording || isStartingRecording;
-  const lines = isActive
-    ? streamLines.length > 0
-      ? streamLines
-      : ['Waiting for speech...']
-    : ['Press record to start listening'];
+  const text = isActive
+    ? latestChunk || 'Waiting for speech...'
+    : 'Press record to start listening';
 
   return (
     <section
@@ -729,13 +727,7 @@ function TopTranscriptStreamBar({
     >
       {isActive && <div className="transcript-stream-label">Listening</div>}
       <div className="transcript-stream-viewport">
-        <div className={`transcript-stream-track ${isActive ? 'transcript-stream-track-active' : ''}`}>
-          {[...lines, ...lines].map((line, idx) => (
-            <div className="transcript-stream-line" key={`${line}-${idx}`}>
-              {line}
-            </div>
-          ))}
-        </div>
+        <div className="transcript-stream-single-line">{text}</div>
       </div>
       <div className="transcript-controls">
         <div className="transcript-controls-selects">
