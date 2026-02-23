@@ -281,6 +281,28 @@
   font-weight: 600;
 }
 
+.sidebar-delete-btn {
+  position: absolute;
+  right: 0.55rem;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 2;
+  border: 0;
+  border-radius: 9999px;
+  width: 1.75rem;
+  height: 1.75rem;
+  background: #fee2e2;
+  color: #b91c1c;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.sidebar-delete-btn:hover {
+  background: #fecaca;
+}
+
 .transcript-stream-bar {
   position: relative;
   display: flex;

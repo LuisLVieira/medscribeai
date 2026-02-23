@@ -1,26 +1,14 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
-export default function App() {
-  const [patients, setPatients] = useState([
-    {
-      id: '1',
-      name: 'John Smith',
-      transcript: `[10:32 AM] Patient: I've been having headaches for the past two weeks.\n\n[10:32 AM] Doctor: Can you describe the headaches? Where exactly do you feel them?`,
-      segments: [],
-      soap: `<h3>Subjective</h3>\n<p>Patient reports recurring headaches for 2 weeks, primarily right-sided, throbbing in nature. Occurs daily, mostly afternoon. Associated nausea occasionally. No visual disturbances.</p>\n\n<h3>Objective</h3>\n<p>Vitals stable. Neurological exam normal. No focal deficits.</p>\n\n<h3>Assessment</h3>\n<p>Migraine headaches, probable.</p>\n\n<h3>Plan</h3>\n<p>1. Start sumatriptan 50mg as needed\n2. Keep headache diary\n3. Follow up in 2 weeks\n4. MRI if symptoms worsen</p>`
-    },
-    {
-      id: '2',
-      name: 'Sarah Johnson',
-      transcript: `[2:15 PM] Patient: I think I sprained my ankle playing basketball yesterday.\n\n[2:15 PM] Doctor: Let me take a look. Can you walk on it?`,
-      segments: [],
-      soap: `<h3>Subjective</h3>\n<p>Ankle injury during basketball 24 hours ago. Moderate pain with ambulation.</p>\n\n<h3>Objective</h3>\n<p>Edema present lateral ankle. Ecchymosis noted. Tender to palpation. ROM limited by pain.</p>\n\n<h3>Assessment</h3>\n<p>Lateral ankle sprain, grade 2.</p>\n\n<h3>Plan</h3>\n<p>RICE protocol, NSAIDs, ankle brace, follow up 1 week.</p>`
-    }
-  ]);
+const DEFAULT_SOAP_TEMPLATE =
+  `<h3>Subjective</h3>\n<p>Enter patient symptoms and history...</p>\n\n<h3>Objective</h3>\n<p>Enter physical exam findings...</p>\n\n<h3>Assessment</h3>\n<p>Enter diagnosis...</p>\n\n<h3>Plan</h3>\n<p>Enter treatment plan...</p>`;
 
-  const [currentPatientId, setCurrentPatientId] = useState('1');
+export default function App() {
+  const [patients, setPatients] = useState([]);
+  const [currentPatientId, setCurrentPatientId] = useState(null);
+  const [patientsLoaded, setPatientsLoaded] = useState(false);
   const [recording, setRecording] = useState(false);
   const [isStartingRecording, setIsStartingRecording] = useState(false);
   const [statusText, setStatusText] = useState('Idle');
@@ -35,6 +23,7 @@ export default function App() {
   const [modelDeleting, setModelDeleting] = useState({});
 
   const currentPatientIdRef = useRef(currentPatientId);
+  const lastSavedPatientsJsonRef = useRef('');
 
   useEffect(() => {
     currentPatientIdRef.current = currentPatientId;
@@ -62,6 +51,69 @@ export default function App() {
   useEffect(() => {
     refreshSetupStatus();
   }, []);
+
+  useEffect(() => {
+    const loadPatients = async () => {
+      if (!isTauri()) {
+        setPatientsLoaded(true);
+        return;
+      }
+
+      try {
+        const loaded = await invoke('load_patients');
+        const normalized = (Array.isArray(loaded) ? loaded : []).map((p) => ({
+          id: String(p.id),
+          name: String(p.name || 'New Patient'),
+          soap: String(p.soap || DEFAULT_SOAP_TEMPLATE),
+          transcript: '',
+          segments: []
+        }));
+
+        setPatients(normalized);
+        const firstId = normalized[0]?.id || null;
+        setCurrentPatientId(firstId);
+
+        const serialized = JSON.stringify(
+          normalized.map((p) => ({ id: p.id, name: p.name, soap: p.soap }))
+        );
+        lastSavedPatientsJsonRef.current = serialized;
+      } catch (err) {
+        setErrorText(String(err));
+      } finally {
+        setPatientsLoaded(true);
+      }
+    };
+
+    loadPatients();
+  }, []);
+
+  const persistedPatients = useMemo(
+    () => patients.map((p) => ({ id: p.id, name: p.name, soap: p.soap })),
+    [patients]
+  );
+
+  const persistedPatientsJson = useMemo(() => JSON.stringify(persistedPatients), [persistedPatients]);
+
+  useEffect(() => {
+    if (!patientsLoaded || !isTauri()) {
+      return;
+    }
+
+    if (persistedPatientsJson === lastSavedPatientsJsonRef.current) {
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      try {
+        await invoke('save_patients', { patients: persistedPatients });
+        lastSavedPatientsJsonRef.current = persistedPatientsJson;
+      } catch (err) {
+        setErrorText(String(err));
+      }
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [patientsLoaded, persistedPatients, persistedPatientsJson]);
 
   useEffect(() => {
     if (!isTauri()) {
@@ -179,10 +231,28 @@ export default function App() {
       name: 'New Patient',
       transcript: '',
       segments: [],
-      soap: `<h3>Subjective</h3>\n<p>Enter patient symptoms and history...</p>\n\n<h3>Objective</h3>\n<p>Enter physical exam findings...</p>\n\n<h3>Assessment</h3>\n<p>Enter diagnosis...</p>\n\n<h3>Plan</h3>\n<p>Enter treatment plan...</p>`
+      soap: DEFAULT_SOAP_TEMPLATE
     };
     setPatients((prev) => [...prev, newPatient]);
     setCurrentPatientId(newId);
+  };
+
+  const deletePatient = (patientId) => {
+    const patient = patients.find((p) => p.id === patientId);
+    if (!patient) {
+      return;
+    }
+
+    setPatients((prev) => {
+      const remaining = prev.filter((p) => p.id !== patientId);
+      setCurrentPatientId((prevId) => {
+        if (prevId !== patientId) {
+          return prevId;
+        }
+        return remaining[0]?.id || null;
+      });
+      return remaining;
+    });
   };
 
   const updatePatient = (id, field, value) => {
@@ -314,9 +384,9 @@ export default function App() {
     }
   };
 
-  const currentPatient = patients.find((p) => p.id === currentPatientId);
+  const currentPatient = patients.find((p) => p.id === currentPatientId) || null;
   const toggleRecording = () => {
-    if (isStartingRecording) {
+    if (isStartingRecording || !currentPatient) {
       return;
     }
     if (recording) {
@@ -347,11 +417,12 @@ export default function App() {
         patients={patients}
         currentPatientId={currentPatientId}
         onSelectPatient={setCurrentPatientId}
+        onDeletePatient={deletePatient}
         onAddPatient={addPatient}
       />
 
       <main className="flex-1 flex flex-col min-h-screen">
-        {currentPatient && (
+        {currentPatient ? (
           <MainContent
             patient={currentPatient}
             onUpdatePatient={updatePatient}
@@ -367,6 +438,8 @@ export default function App() {
               setSetupVisible(true);
             }}
           />
+        ) : (
+          <EmptyState onAddPatient={addPatient} />
         )}
       </main>
     </div>
@@ -471,7 +544,7 @@ function StartupSetupScreen({
   );
 }
 
-function Sidebar({ patients, currentPatientId, onSelectPatient, onAddPatient }) {
+function Sidebar({ patients, currentPatientId, onSelectPatient, onDeletePatient, onAddPatient }) {
   return (
     <aside className="w-72 bg-gray-50 border-r border-gray-200 flex flex-col h-screen">
       <div className="p-4 border-b border-gray-200">
@@ -480,21 +553,31 @@ function Sidebar({ patients, currentPatientId, onSelectPatient, onAddPatient }) 
 
       <nav className="flex-1 overflow-y-auto py-2">
         {patients.map((patient) => (
-          <button
-            key={patient.id}
-            onClick={() => onSelectPatient(patient.id)}
-            className={`w-full text-left px-4 py-3 transition-colors relative ${
-              currentPatientId === patient.id
-                ? 'bg-blue-50 text-blue-700 border-l-4 border-blue-500'
-                : 'hover:bg-gray-100 border-l-4 border-transparent'
-            }`}
-            aria-label={`Select patient ${patient.name}`}
-          >
-            <div className="font-medium truncate">{patient.name}</div>
-            <div className="text-xs text-gray-500 mt-1">
-              {patient.transcript ? 'Has transcript' : 'No transcript'}
-            </div>
-          </button>
+          <div key={patient.id} className="relative">
+            <button
+              onClick={() => onSelectPatient(patient.id)}
+              className={`w-full text-left px-4 py-3 pr-12 transition-colors relative ${
+                currentPatientId === patient.id
+                  ? 'bg-blue-50 text-blue-700 border-l-4 border-blue-500'
+                  : 'hover:bg-gray-100 border-l-4 border-transparent'
+              }`}
+              aria-label={`Select patient ${patient.name}`}
+            >
+              <div className="font-medium truncate">{patient.name}</div>
+            </button>
+            <button
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onDeletePatient(patient.id);
+              }}
+              className="sidebar-delete-btn"
+              aria-label={`Delete patient ${patient.name}`}
+              title={`Delete ${patient.name}`}
+            >
+              <TrashIcon />
+            </button>
+          </div>
         ))}
       </nav>
 
@@ -574,6 +657,20 @@ function MainContent({
             aria-label="SOAP note editor"
           />
         </div>
+      </div>
+    </div>
+  );
+}
+
+function EmptyState({ onAddPatient }) {
+  return (
+    <div className="flex-1 flex items-center justify-center px-8">
+      <div className="text-center max-w-sm">
+        <h2 className="text-xl font-semibold text-gray-900">No patients yet</h2>
+        <p className="mt-2 text-sm text-gray-600">Create a patient to start recording and generating SOAP notes.</p>
+        <button className="mt-5 px-4 py-2 bg-blue-600 text-white rounded-md" onClick={onAddPatient}>
+          Add Patient
+        </button>
       </div>
     </div>
   );
@@ -725,6 +822,14 @@ function StopIcon() {
   return (
     <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
       <rect x="6" y="6" width="12" height="12" />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-1 12a2 2 0 01-2 2H8a2 2 0 01-2-2L5 7m5 4v6m4-6v6M9 7V4a1 1 0 011-1h4a1 1 0 011 1v3M4 7h16" />
     </svg>
   );
 }
