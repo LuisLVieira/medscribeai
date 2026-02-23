@@ -25,7 +25,9 @@ dist-ssr
 
 # OpenSpec
 .codex
-.github
+.github/*
+!.github/workflows/
+!.github/workflows/release.yml
 
 # Binary sidecars and models
 src-tauri/binaries/llama-cli

@@ -5,15 +5,67 @@ MedScribeAI is an experimental Tauri (Rust + React) desktop application that pro
 ## Quick Start
 
 - Install Rust toolchain (stable) and platform-specific build tools for Tauri.
-- Install Node.js (recommended 18+). Then from project root:
+- Install Node.js `20.19+` (or `22.12+`), then from project root:
 
 ```bash
 npm install
-npm run dev    # start the frontend (vite)
-npm run tauri  # run the Tauri app (or `npm run tauri dev` depending on setup)
+npm run tauri dev
 ```
 
 On first transcription run the app will download Whisper GGML models into the app data directory under `models/`.
+
+## Build Instructions
+
+### 1. Build frontend only
+
+```bash
+npm run build
+```
+
+### 2. Build Tauri app bundle (`.app`) on macOS
+
+`whisper-rs-sys` may fail on macOS with `std::filesystem` errors if the minimum target is too old (`10.13`). Use:
+
+```bash
+CMAKE_OSX_DEPLOYMENT_TARGET=10.15 \
+CFLAGS='-mmacosx-version-min=10.15' \
+CXXFLAGS='-mmacosx-version-min=10.15' \
+npm run tauri build -- --bundles app
+```
+
+Output path:
+
+- `src-tauri/target/release/bundle/macos/MedScribeAI.app`
+
+### 3. Full Tauri build (includes DMG)
+
+```bash
+npm run tauri build
+```
+
+Notes:
+
+- If your environment hits `hdiutil: create failed` during DMG creation, build `--bundles app` first as the reliable path.
+- Tauri warns that `identifier: "com.medscribeai.app"` ends with `.app`; consider changing it to avoid macOS bundle naming conflicts.
+
+## GitHub Releases (macOS + Windows + Linux)
+
+This repo includes `.github/workflows/release.yml` to build and publish all three platforms from GitHub Actions.
+
+Trigger a release by pushing a version tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The workflow will build:
+
+- macOS: `.app` bundle
+- Windows: `msi` and `nsis` installers
+- Linux: `AppImage` and `deb` packages
+
+and upload them to the GitHub Release for that tag.
 
 ## Project Layout
 
@@ -56,31 +108,10 @@ git checkout -b feat/your-feature
 3. Run the app locally with `npm run tauri dev` to validate end-to-end behavior.
 4. Push your branch and open a PR against `main`.
 
-## Running Locally — Rust
-
-From `src-tauri/` you can build the native parts with Cargo:
-
-```bash
-cd src-tauri
-cargo build
-# For a release build:
-cargo build --release
-```
-
 ## Reporting Issues
 
 - Use GitHub Issues to report bugs or request enhancements. Include steps to reproduce, platform details (OS, Rust & Node versions), and relevant logs.
 
 ## Code of Conduct
 
-Be respectful and constructive. If you'd like, I can add a contributor `CODE_OF_CONDUCT.md` and templates for issues/PRs.
-
----
-
-If you want, I can now:
-
-- update other metadata (app icons, `tauri.conf.json` display name),
-- add PR/issue templates and a `CODE_OF_CONDUCT.md`, or
-- run a quick validation (e.g., `npm run build` or `cargo check`) locally.
-
-Tell me which next step you prefer.
+Be respectful and constructive.
