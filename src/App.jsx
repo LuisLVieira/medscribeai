@@ -5,6 +5,7 @@ import { listen } from '@tauri-apps/api/event';
 const DEFAULT_SOAP_TEMPLATE =
   '';
 const MIC_SELECTION_STORAGE_KEY = 'medscribe.selectedMicDeviceKey';
+const DEBUG_MODE_STORAGE_KEY = 'medscribe.debugModeEnabled';
 
 export default function App() {
   const [patients, setPatients] = useState([]);
@@ -16,6 +17,13 @@ export default function App() {
   const [copyMessage, setCopyMessage] = useState('');
   const [statusText, setStatusText] = useState('Idle');
   const [errorText, setErrorText] = useState('');
+  const [debugModeEnabled, setDebugModeEnabled] = useState(() => {
+    if (typeof window === 'undefined') {
+      return false;
+    }
+    return window.localStorage.getItem(DEBUG_MODE_STORAGE_KEY) === 'true';
+  });
+  const [debugErrors, setDebugErrors] = useState([]);
   const [vadSensitivity, setVadSensitivity] = useState(2);
 
   const [setupVisible, setSetupVisible] = useState(true);
@@ -35,9 +43,36 @@ export default function App() {
   const currentPatientIdRef = useRef(currentPatientId);
   const lastSavedPatientsJsonRef = useRef('');
 
+  const reportError = (source, err) => {
+    const message = String(err || '');
+    if (!message.trim()) {
+      return;
+    }
+    setErrorText(message);
+    setDebugErrors((prev) => {
+      const next = [
+        {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          source,
+          message,
+          at: new Date().toISOString()
+        },
+        ...prev
+      ];
+      return next.slice(0, 60);
+    });
+  };
+
   useEffect(() => {
     currentPatientIdRef.current = currentPatientId;
   }, [currentPatientId]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    window.localStorage.setItem(DEBUG_MODE_STORAGE_KEY, debugModeEnabled ? 'true' : 'false');
+  }, [debugModeEnabled]);
 
   const refreshSetupStatus = async () => {
     if (!isTauri()) {
@@ -53,6 +88,7 @@ export default function App() {
       setSetupError('');
     } catch (err) {
       setSetupError(String(err));
+      reportError('setup-status', err);
     } finally {
       setSetupLoading(false);
     }
@@ -105,6 +141,7 @@ export default function App() {
       setMicDevicesError('');
     } catch (err) {
       setMicDevicesError(String(err));
+      reportError('mic-devices', err);
     } finally {
       setMicDevicesLoading(false);
     }
@@ -124,6 +161,7 @@ export default function App() {
       setMicTestRunning(true);
     } catch (err) {
       setMicDevicesError(String(err));
+      reportError('mic-test-start', err);
       setMicTestRunning(false);
     }
   };
@@ -172,7 +210,7 @@ export default function App() {
         );
         lastSavedPatientsJsonRef.current = serialized;
       } catch (err) {
-        setErrorText(String(err));
+        reportError('load-patients', err);
       } finally {
         setPatientsLoaded(true);
       }
@@ -202,7 +240,7 @@ export default function App() {
         await invoke('save_patients', { patients: persistedPatients });
         lastSavedPatientsJsonRef.current = persistedPatientsJson;
       } catch (err) {
-        setErrorText(String(err));
+        reportError('save-patients', err);
       }
     }, 300);
 
@@ -267,7 +305,7 @@ export default function App() {
 
       const unlistenError = await listen('transcription-error', (event) => {
         const message = event.payload?.message || 'Unknown transcription error';
-        setErrorText(message);
+        reportError('transcription', message);
         setStatusText('Error');
         setRecording(false);
       });
@@ -318,6 +356,7 @@ export default function App() {
       const unlistenMicError = await listen('mic-test-error', (event) => {
         const message = event.payload?.message || 'Microphone test failed';
         setMicDevicesError(message);
+        reportError('mic-test', message);
         setMicTestRunning(false);
       });
       if (cancelled) {
@@ -383,7 +422,10 @@ export default function App() {
 
   const startRecording = async () => {
     if (!isTauri()) {
-      setErrorText('Tauri API not available. Start with `npm run tauri dev` (not `npm run dev`).');
+      reportError(
+        'recording-start',
+        'Tauri API not available. Start with `npm run tauri dev` (not `npm run dev`).'
+      );
       return;
     }
 
@@ -404,7 +446,7 @@ export default function App() {
       setRecording(true);
       setStatusText('Listening...');
     } catch (err) {
-      setErrorText(String(err));
+      reportError('recording-start', err);
       setStatusText('Failed to start');
     } finally {
       setIsStartingRecording(false);
@@ -451,7 +493,7 @@ export default function App() {
       );
       setStatusText('Idle');
     } catch (err) {
-      setErrorText(String(err));
+      reportError('soap-generate', err);
       setStatusText('SOAP note generation failed');
     } finally {
       setIsGeneratingSoap(false);
@@ -471,7 +513,7 @@ export default function App() {
       setCopyMessage('Copied');
       setTimeout(() => setCopyMessage(''), 1600);
     } catch (err) {
-      setErrorText(`Failed to copy SOAP note: ${String(err)}`);
+      reportError('copy-soap', `Failed to copy SOAP note: ${String(err)}`);
     }
   };
 
@@ -497,6 +539,7 @@ export default function App() {
       await refreshSetupStatus();
     } catch (err) {
       setSetupError(String(err));
+      reportError('model-download', err);
       setModelDownloads((prev) => ({
         ...prev,
         [modelId]: {
@@ -525,6 +568,7 @@ export default function App() {
       });
     } catch (err) {
       setSetupError(String(err));
+      reportError('model-delete', err);
     } finally {
       setModelDeleting((prev) => ({ ...prev, [modelId]: false }));
     }
@@ -544,6 +588,7 @@ export default function App() {
 
   if (setupVisible) {
     return (
+      <>
       <StartupSetupScreen
         setupStatus={setupStatus}
         setupLoading={setupLoading}
@@ -578,10 +623,22 @@ export default function App() {
         onRefreshMicDevices={refreshMicDevices}
         onToggleMicTest={() => (micTestRunning ? stopMicTest() : startMicTest())}
       />
+        <DebugModeTools
+          enabled={debugModeEnabled}
+          onToggle={() => setDebugModeEnabled((prev) => !prev)}
+          errors={debugErrors}
+          latestError={errorText}
+          onClearErrors={() => {
+            setDebugErrors([]);
+            setErrorText('');
+          }}
+        />
+      </>
     );
   }
 
   return (
+    <>
     <div className="flex h-screen bg-white text-gray-900 font-sans">
       <Sidebar
         patients={patients}
@@ -614,6 +671,56 @@ export default function App() {
         )}
       </main>
     </div>
+      <DebugModeTools
+        enabled={debugModeEnabled}
+        onToggle={() => setDebugModeEnabled((prev) => !prev)}
+        errors={debugErrors}
+        latestError={errorText}
+        onClearErrors={() => {
+          setDebugErrors([]);
+          setErrorText('');
+        }}
+      />
+    </>
+  );
+}
+
+function DebugModeTools({ enabled, onToggle, errors, latestError, onClearErrors }) {
+  return (
+    <>
+      <button
+        type="button"
+        className={`debug-mode-toggle ${enabled ? 'on' : 'off'}`}
+        onClick={onToggle}
+        aria-pressed={enabled}
+        title="Toggle debug mode"
+      >
+        Debug {enabled ? 'ON' : 'OFF'}
+      </button>
+
+      {enabled && (
+        <section className="debug-panel" aria-live="polite">
+          <div className="debug-panel-header">
+            <h3>Debug Errors</h3>
+            <button type="button" onClick={onClearErrors}>
+              Clear
+            </button>
+          </div>
+          {latestError && <p className="debug-panel-latest">Latest: {latestError}</p>}
+          {errors.length === 0 ? (
+            <p className="debug-panel-empty">No errors captured.</p>
+          ) : (
+            <ul className="debug-panel-list">
+              {errors.map((entry) => (
+                <li key={entry.id}>
+                  <span>[{entry.source}]</span> {entry.message}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
+    </>
   );
 }
 
