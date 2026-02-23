@@ -37,6 +37,12 @@ Output path:
 
 - `src-tauri/target/release/bundle/macos/MedScribeAI.app`
 
+If a downloaded app is blocked on macOS with a "damaged" message, remove quarantine metadata and reopen:
+
+```bash
+xattr -dr com.apple.quarantine /path/to/MedScribeAI.app
+```
+
 ### 3. Full Tauri build (includes DMG)
 
 ```bash
