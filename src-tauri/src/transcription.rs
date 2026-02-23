@@ -10,19 +10,29 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use hf_hub::api::{sync::ApiBuilder, Progress};
+use hf_hub::Cache;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{path::BaseDirectory, AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use thiserror::Error;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 const TARGET_SAMPLE_RATE: u32 = 16_000;
 const MODEL_DIR: &str = "models";
+const HF_CACHE_DIR: &str = "hf-cache";
+const MEDGEMMA_MARKER_FILE: &str = "medgemma-path.json";
+const MODEL_ID_WHISPER_TINY: &str = "whisper_tiny";
+const MODEL_ID_MEDGEMMA: &str = "medgemma";
+const WHISPER_TINY_FILENAME: &str = "ggml-tiny.en.bin";
+const WHISPER_TINY_URL: &str =
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin";
+const MEDGEMMA_HF_REPO: &str = "unsloth/medgemma-1.5-4b-it-GGUF";
+const MEDGEMMA_HF_FILE: &str = "medgemma-1.5-4b-it-Q4_K_M.gguf";
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct TranscriptionConfig {
-    pub model: Option<String>,
     pub vad_sensitivity: Option<u8>,
     pub max_chunk_seconds: Option<f32>,
 }
@@ -30,7 +40,6 @@ pub struct TranscriptionConfig {
 impl Default for TranscriptionConfig {
     fn default() -> Self {
         Self {
-            model: Some("tiny.en".to_string()),
             vad_sensitivity: Some(2),
             max_chunk_seconds: Some(14.0),
         }
@@ -41,10 +50,8 @@ impl TranscriptionConfig {
     pub fn from_value(value: Option<Value>) -> Self {
         match value {
             Some(raw) => {
-                let mut parsed = serde_json::from_value::<TranscriptionConfig>(raw).unwrap_or_default();
-                if parsed.model.is_none() {
-                    parsed.model = Some("tiny.en".to_string());
-                }
+                let mut parsed =
+                    serde_json::from_value::<TranscriptionConfig>(raw).unwrap_or_default();
                 if parsed.vad_sensitivity.is_none() {
                     parsed.vad_sensitivity = Some(2);
                 }
@@ -54,13 +61,6 @@ impl TranscriptionConfig {
                 parsed
             }
             None => TranscriptionConfig::default(),
-        }
-    }
-
-    fn normalized_model(&self) -> &'static str {
-        match self.model.as_deref() {
-            Some("base") | Some("base.en") => "base.en",
-            _ => "tiny.en",
         }
     }
 
@@ -87,10 +87,31 @@ struct ErrorPayload {
 
 #[derive(Debug, Serialize, Clone)]
 struct DownloadProgressPayload {
-    model: String,
+    model_id: String,
     progress: f32,
     downloaded_bytes: u64,
     total_bytes: Option<u64>,
+    status: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct RequiredModelStatusPayload {
+    model_id: String,
+    label: String,
+    ready: bool,
+    path: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ModelSetupStatusPayload {
+    models_root: String,
+    models: Vec<RequiredModelStatusPayload>,
+    all_ready: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MedgemmaMarker {
+    local_path: String,
 }
 
 #[derive(Debug, Error)]
@@ -135,7 +156,11 @@ pub static TRANSCRIPTION_MANAGER: Lazy<TranscriptionManager> = Lazy::new(|| Tran
 });
 
 impl TranscriptionManager {
-    pub fn start(&self, app: AppHandle, config: TranscriptionConfig) -> Result<(), TranscriptionError> {
+    pub fn start(
+        &self,
+        app: AppHandle,
+        config: TranscriptionConfig,
+    ) -> Result<(), TranscriptionError> {
         let mut state = self
             .state
             .lock()
@@ -144,14 +169,19 @@ impl TranscriptionManager {
             return Err(TranscriptionError::AlreadyListening);
         }
 
-        let model_path = ensure_model_file(&app, config.normalized_model())?;
+        let model_path = require_whisper_tiny_model_file(&app)?;
         let stop_flag = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop_flag);
         let app_for_worker = app.clone();
         let worker_config = config.clone();
 
         let worker = thread::spawn(move || {
-            if let Err(err) = run_transcription_loop(app_for_worker.clone(), model_path, worker_config, worker_stop) {
+            if let Err(err) = run_transcription_loop(
+                app_for_worker.clone(),
+                model_path,
+                worker_config,
+                worker_stop,
+            ) {
                 emit_error(
                     &app_for_worker,
                     &format!("transcription loop exited: {err}"),
@@ -172,7 +202,10 @@ impl TranscriptionManager {
             .lock()
             .map_err(|_| TranscriptionError::Internal("manager lock poisoned".to_string()))?;
 
-        let mut runtime = state.runtime.take().ok_or(TranscriptionError::NotListening)?;
+        let mut runtime = state
+            .runtime
+            .take()
+            .ok_or(TranscriptionError::NotListening)?;
         runtime.stop_flag.store(true, Ordering::SeqCst);
         if let Some(worker) = runtime.worker.take() {
             let _ = worker.join();
@@ -199,7 +232,29 @@ pub async fn stop_transcription_command() -> Result<(), String> {
         .map_err(|err| err.to_string())
 }
 
-pub async fn generate_soap_note_command(app: AppHandle, transcript: String) -> Result<String, String> {
+pub async fn get_model_setup_status_command(
+    app: AppHandle,
+) -> Result<ModelSetupStatusPayload, String> {
+    tauri::async_runtime::spawn_blocking(move || get_model_setup_status(&app))
+        .await
+        .map_err(|err| format!("task join error: {err}"))?
+        .map_err(|err| err.to_string())
+}
+
+pub async fn download_required_model_command(
+    app: AppHandle,
+    model_id: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || download_required_model(&app, &model_id))
+        .await
+        .map_err(|err| format!("task join error: {err}"))?
+        .map_err(|err| err.to_string())
+}
+
+pub async fn generate_soap_note_command(
+    app: AppHandle,
+    transcript: String,
+) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || generate_soap_note(&app, &transcript))
         .await
         .map_err(|err| format!("task join error: {err}"))?
@@ -271,11 +326,8 @@ Conversation:\n\
     Ok(soap_text)
 }
 
-fn resolve_sidecar_path(app: &AppHandle) -> Result<PathBuf, String> {
+fn resolve_sidecar_path(_app: &AppHandle) -> Result<PathBuf, String> {
     let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(p) = app.path().resolve("binaries/llama-cli", BaseDirectory::Resource) {
-        candidates.push(p);
-    }
     if let Ok(p) = std::env::current_dir() {
         candidates.push(p.join("src-tauri").join("binaries").join("llama-cli"));
         candidates.push(p.join("binaries").join("llama-cli"));
@@ -291,22 +343,18 @@ fn resolve_sidecar_path(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn resolve_llm_model_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(p) = app.path().resolve("models/model-Q4_K_M.gguf", BaseDirectory::Resource) {
-        candidates.push(p);
+    let path = read_medgemma_marker_path(app).map_err(|_| {
+        "could not locate MedGemma GGUF model in app data; download it from setup screen."
+            .to_string()
+    })?;
+    if path.exists() {
+        Ok(path)
+    } else {
+        Err(
+            "MedGemma model marker exists but file is missing; re-download in setup screen."
+                .to_string(),
+        )
     }
-    if let Ok(p) = std::env::current_dir() {
-        candidates.push(p.join("src-tauri").join("models").join("model-Q4_K_M.gguf"));
-        candidates.push(p.join("models").join("model-Q4_K_M.gguf"));
-    }
-
-    for path in candidates {
-        if path.exists() {
-            return Ok(path);
-        }
-    }
-
-    Err("could not locate GGUF model file: model-Q4_K_M.gguf".to_string())
 }
 
 fn extract_soap_text(raw: &str) -> String {
@@ -397,56 +445,104 @@ fn soap_header_name(line: &str) -> Option<&'static str> {
     }
 }
 
-fn ensure_model_file(app: &AppHandle, model_key: &str) -> Result<PathBuf, TranscriptionError> {
-    let base_dir = app
-        .path()
-        .app_local_data_dir()
-        .map_err(|_| TranscriptionError::ModelPath)?;
-    let model_dir = base_dir.join(MODEL_DIR);
-    fs::create_dir_all(&model_dir)
-        .map_err(|err| TranscriptionError::ModelDownload(format!("cannot create model dir: {err}")))?;
+fn get_model_setup_status(app: &AppHandle) -> Result<ModelSetupStatusPayload, TranscriptionError> {
+    let models_root = models_root(app)?;
+    fs::create_dir_all(&models_root).map_err(|err| {
+        TranscriptionError::ModelDownload(format!("cannot create model dir: {err}"))
+    })?;
 
-    let (filename, url) = match model_key {
-        "base.en" => (
-            "ggml-base.en.bin",
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
-        ),
-        _ => (
-            "ggml-tiny.en.bin",
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin",
-        ),
+    let whisper_path = whisper_tiny_path(app)?;
+    let whisper_ready = whisper_path.exists();
+
+    let medgemma_path = read_medgemma_marker_path(app).ok();
+    let medgemma_ready = medgemma_path.as_ref().is_some_and(|path| path.exists());
+
+    let payload = ModelSetupStatusPayload {
+        models_root: models_root.to_string_lossy().to_string(),
+        models: vec![
+            RequiredModelStatusPayload {
+                model_id: MODEL_ID_WHISPER_TINY.to_string(),
+                label: "Whisper tiny.en".to_string(),
+                ready: whisper_ready,
+                path: whisper_ready.then(|| whisper_path.to_string_lossy().to_string()),
+            },
+            RequiredModelStatusPayload {
+                model_id: MODEL_ID_MEDGEMMA.to_string(),
+                label: "MedGemma GGUF".to_string(),
+                ready: medgemma_ready,
+                path: medgemma_path
+                    .filter(|path| path.exists())
+                    .map(|path| path.to_string_lossy().to_string()),
+            },
+        ],
+        all_ready: whisper_ready && medgemma_ready,
     };
 
-    let model_path = model_dir.join(filename);
+    Ok(payload)
+}
+
+fn download_required_model(app: &AppHandle, model_id: &str) -> Result<(), TranscriptionError> {
+    match model_id {
+        MODEL_ID_WHISPER_TINY => {
+            let path = whisper_tiny_path(app)?;
+            if path.exists() {
+                emit_model_progress(app, MODEL_ID_WHISPER_TINY, 1.0, 0, None, "completed");
+                return Ok(());
+            }
+            download_whisper_tiny_model(app, &path)
+        }
+        MODEL_ID_MEDGEMMA => {
+            if let Ok(path) = read_medgemma_marker_path(app) {
+                if path.exists() {
+                    emit_model_progress(app, MODEL_ID_MEDGEMMA, 1.0, 0, None, "completed");
+                    return Ok(());
+                }
+            }
+            download_medgemma_model(app)
+        }
+        _ => Err(TranscriptionError::ModelDownload(format!(
+            "unknown model id: {model_id}"
+        ))),
+    }
+}
+
+fn require_whisper_tiny_model_file(app: &AppHandle) -> Result<PathBuf, TranscriptionError> {
+    let model_path = whisper_tiny_path(app)?;
     if model_path.exists() {
         return Ok(model_path);
     }
-
-    download_model(app, &model_path, url, model_key)?;
-    Ok(model_path)
+    Err(TranscriptionError::ModelDownload(
+        "Whisper tiny model not downloaded. Please download it from setup screen.".to_string(),
+    ))
 }
 
-fn download_model(
+fn download_whisper_tiny_model(
     app: &AppHandle,
     model_path: &Path,
-    url: &str,
-    model_key: &str,
 ) -> Result<(), TranscriptionError> {
+    if let Some(parent) = model_path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            TranscriptionError::ModelDownload(format!("cannot create model dir: {err}"))
+        })?;
+    }
+
+    emit_model_progress(app, MODEL_ID_WHISPER_TINY, 0.0, 0, None, "downloading");
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(900))
         .build()
         .map_err(|err| TranscriptionError::ModelDownload(err.to_string()))?;
 
     let mut response = client
-        .get(url)
+        .get(WHISPER_TINY_URL)
         .send()
         .and_then(|res| res.error_for_status())
         .map_err(|err| TranscriptionError::ModelDownload(err.to_string()))?;
 
     let total = response.content_length();
     let tmp_path = model_path.with_extension("bin.part");
-    let mut file = File::create(&tmp_path)
-        .map_err(|err| TranscriptionError::ModelDownload(format!("cannot create tmp file: {err}")))?;
+    let mut file = File::create(&tmp_path).map_err(|err| {
+        TranscriptionError::ModelDownload(format!("cannot create tmp file: {err}"))
+    })?;
 
     let mut downloaded = 0_u64;
     let mut buffer = [0_u8; 1024 * 64];
@@ -463,31 +559,180 @@ fn download_model(
         downloaded += n as u64;
 
         let progress = total
-            .map(|len| if len > 0 { downloaded as f32 / len as f32 } else { 0.0 })
+            .map(|len| {
+                if len > 0 {
+                    downloaded as f32 / len as f32
+                } else {
+                    0.0
+                }
+            })
             .unwrap_or(0.0);
-        let payload = DownloadProgressPayload {
-            model: model_key.to_string(),
+        emit_model_progress(
+            app,
+            MODEL_ID_WHISPER_TINY,
             progress,
-            downloaded_bytes: downloaded,
-            total_bytes: total,
-        };
-        let _ = app.emit("model-download-progress", payload);
+            downloaded,
+            total,
+            "downloading",
+        );
     }
 
     fs::rename(&tmp_path, model_path)
         .map_err(|err| TranscriptionError::ModelDownload(format!("rename failed: {err}")))?;
-
-    let _ = app.emit(
-        "model-download-progress",
-        DownloadProgressPayload {
-            model: model_key.to_string(),
-            progress: 1.0,
-            downloaded_bytes: downloaded,
-            total_bytes: total,
-        },
+    emit_model_progress(
+        app,
+        MODEL_ID_WHISPER_TINY,
+        1.0,
+        downloaded,
+        total,
+        "completed",
     );
 
     Ok(())
+}
+
+fn download_medgemma_model(app: &AppHandle) -> Result<(), TranscriptionError> {
+    let cache_root = medgemma_cache_root(app)?;
+    fs::create_dir_all(&cache_root).map_err(|err| {
+        TranscriptionError::ModelDownload(format!("cannot create hf cache dir: {err}"))
+    })?;
+
+    emit_model_progress(app, MODEL_ID_MEDGEMMA, 0.0, 0, None, "downloading");
+
+    let cache = Cache::new(cache_root);
+    let api = ApiBuilder::from_cache(cache)
+        .with_progress(false)
+        .build()
+        .map_err(|err| TranscriptionError::ModelDownload(err.to_string()))?;
+    let repo = api.model(MEDGEMMA_HF_REPO.to_string());
+    let progress = TauriDownloadProgress::new(app.clone(), MODEL_ID_MEDGEMMA.to_string());
+    let model_path = repo
+        .download_with_progress(MEDGEMMA_HF_FILE, progress)
+        .map_err(|err| TranscriptionError::ModelDownload(err.to_string()))?;
+
+    write_medgemma_marker_path(app, &model_path)?;
+    emit_model_progress(app, MODEL_ID_MEDGEMMA, 1.0, 0, None, "completed");
+    Ok(())
+}
+
+fn models_root(app: &AppHandle) -> Result<PathBuf, TranscriptionError> {
+    app.path()
+        .app_local_data_dir()
+        .map(|dir| dir.join(MODEL_DIR))
+        .map_err(|_| TranscriptionError::ModelPath)
+}
+
+fn whisper_tiny_path(app: &AppHandle) -> Result<PathBuf, TranscriptionError> {
+    Ok(models_root(app)?.join(WHISPER_TINY_FILENAME))
+}
+
+fn medgemma_cache_root(app: &AppHandle) -> Result<PathBuf, TranscriptionError> {
+    Ok(models_root(app)?.join(HF_CACHE_DIR))
+}
+
+fn medgemma_marker_path(app: &AppHandle) -> Result<PathBuf, TranscriptionError> {
+    Ok(models_root(app)?.join(MEDGEMMA_MARKER_FILE))
+}
+
+fn write_medgemma_marker_path(
+    app: &AppHandle,
+    model_path: &Path,
+) -> Result<(), TranscriptionError> {
+    let marker_path = medgemma_marker_path(app)?;
+    let marker = MedgemmaMarker {
+        local_path: model_path.to_string_lossy().to_string(),
+    };
+    let content = serde_json::to_string_pretty(&marker)
+        .map_err(|err| TranscriptionError::ModelDownload(err.to_string()))?;
+    fs::write(marker_path, content)
+        .map_err(|err| TranscriptionError::ModelDownload(format!("cannot write marker: {err}")))
+}
+
+fn read_medgemma_marker_path(app: &AppHandle) -> Result<PathBuf, TranscriptionError> {
+    let marker_path = medgemma_marker_path(app)?;
+    let raw = fs::read_to_string(&marker_path).map_err(|_| TranscriptionError::ModelPath)?;
+    let marker: MedgemmaMarker = serde_json::from_str(&raw)
+        .map_err(|err| TranscriptionError::ModelDownload(err.to_string()))?;
+    Ok(PathBuf::from(marker.local_path))
+}
+
+fn emit_model_progress(
+    app: &AppHandle,
+    model_id: &str,
+    progress: f32,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    status: &str,
+) {
+    let payload = DownloadProgressPayload {
+        model_id: model_id.to_string(),
+        progress,
+        downloaded_bytes,
+        total_bytes,
+        status: status.to_string(),
+    };
+    let _ = app.emit("model-download-progress", payload);
+}
+
+struct TauriDownloadProgress {
+    app: AppHandle,
+    model_id: String,
+    total: usize,
+    downloaded: usize,
+}
+
+impl TauriDownloadProgress {
+    fn new(app: AppHandle, model_id: String) -> Self {
+        Self {
+            app,
+            model_id,
+            total: 0,
+            downloaded: 0,
+        }
+    }
+}
+
+impl Progress for TauriDownloadProgress {
+    fn init(&mut self, size: usize, _filename: &str) {
+        self.total = size;
+        self.downloaded = 0;
+        emit_model_progress(
+            &self.app,
+            &self.model_id,
+            0.0,
+            0,
+            Some(size as u64),
+            "downloading",
+        );
+    }
+
+    fn update(&mut self, size: usize) {
+        self.downloaded += size;
+        let progress = if self.total > 0 {
+            self.downloaded as f32 / self.total as f32
+        } else {
+            0.0
+        };
+        emit_model_progress(
+            &self.app,
+            &self.model_id,
+            progress,
+            self.downloaded as u64,
+            Some(self.total as u64),
+            "downloading",
+        );
+    }
+
+    fn finish(&mut self) {
+        emit_model_progress(
+            &self.app,
+            &self.model_id,
+            1.0,
+            self.downloaded as u64,
+            Some(self.total as u64),
+            "completed",
+        );
+    }
 }
 
 fn run_transcription_loop(
@@ -512,9 +757,23 @@ fn run_transcription_loop(
 
     let err_app = app.clone();
     let stream = match stream_config.sample_format() {
-        cpal::SampleFormat::F32 => build_input_stream_f32(&device, &stream_config.into(), channels, tx.clone(), err_app)?,
-        cpal::SampleFormat::I16 => build_input_stream_i16(&device, &stream_config.into(), channels, tx.clone(), app.clone())?,
-        cpal::SampleFormat::U16 => build_input_stream_u16(&device, &stream_config.into(), channels, tx, app.clone())?,
+        cpal::SampleFormat::F32 => build_input_stream_f32(
+            &device,
+            &stream_config.into(),
+            channels,
+            tx.clone(),
+            err_app,
+        )?,
+        cpal::SampleFormat::I16 => build_input_stream_i16(
+            &device,
+            &stream_config.into(),
+            channels,
+            tx.clone(),
+            app.clone(),
+        )?,
+        cpal::SampleFormat::U16 => {
+            build_input_stream_u16(&device, &stream_config.into(), channels, tx, app.clone())?
+        }
         _ => return Err(TranscriptionError::UnsupportedSampleFormat),
     };
 
@@ -838,7 +1097,8 @@ impl AudioChunker {
                 if !self.in_speech {
                     self.in_speech = true;
                     self.silence_frames = 0;
-                    self.active_start_sample = self.total_samples_seen.saturating_sub(self.pre_roll.len());
+                    self.active_start_sample =
+                        self.total_samples_seen.saturating_sub(self.pre_roll.len());
                     self.active_chunk.clear();
                     if !self.carry_overlap.is_empty() {
                         self.active_chunk.extend_from_slice(&self.carry_overlap);

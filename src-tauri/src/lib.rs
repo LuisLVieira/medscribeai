@@ -17,6 +17,18 @@ async fn generate_soap_note(app: tauri::AppHandle, transcript: String) -> Result
     transcription::generate_soap_note_command(app, transcript).await
 }
 
+#[tauri::command]
+async fn get_model_setup_status(
+    app: tauri::AppHandle,
+) -> Result<transcription::ModelSetupStatusPayload, String> {
+    transcription::get_model_setup_status_command(app).await
+}
+
+#[tauri::command]
+async fn download_required_model(app: tauri::AppHandle, model_id: String) -> Result<(), String> {
+    transcription::download_required_model_command(app, model_id).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
@@ -31,7 +43,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             start_transcription,
             stop_transcription,
-            generate_soap_note
+            generate_soap_note,
+            get_model_setup_status,
+            download_required_model
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

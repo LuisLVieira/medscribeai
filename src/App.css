@@ -67,6 +67,168 @@
   line-height: 1.625;
 }
 
+.setup-screen-root {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem 1rem;
+  background: linear-gradient(160deg, #f8fafc 0%, #eff6ff 42%, #f8fafc 100%);
+}
+
+.setup-card-shell {
+  width: min(860px, 100%);
+  background: #ffffff;
+  border: 1px solid #dbeafe;
+  border-radius: 1rem;
+  padding: 1.5rem;
+  box-shadow: 0 22px 44px -28px rgba(30, 64, 175, 0.35);
+}
+
+.setup-title {
+  font-size: 1.6rem;
+  font-weight: 700;
+  color: #1e293b;
+}
+
+.setup-subtitle {
+  margin-top: 0.4rem;
+  color: #475569;
+}
+
+.setup-root-path {
+  margin-top: 0.9rem;
+  font-size: 0.88rem;
+  color: #64748b;
+  word-break: break-word;
+}
+
+.setup-loading {
+  margin-top: 1rem;
+  color: #334155;
+}
+
+.setup-model-list {
+  margin-top: 1rem;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.8rem;
+}
+
+.setup-model-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 0.75rem;
+  padding: 0.9rem;
+  background: #f8fafc;
+}
+
+.setup-model-top {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.setup-model-name {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.setup-model-badge {
+  margin-top: 0.3rem;
+  display: inline-flex;
+  border-radius: 9999px;
+  padding: 0.2rem 0.55rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.setup-model-badge.ready {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.setup-model-badge.missing {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.setup-download-btn {
+  border: 0;
+  border-radius: 0.45rem;
+  background: #2563eb;
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0.45rem 0.75rem;
+}
+
+.setup-download-btn:disabled {
+  background: #94a3b8;
+  cursor: not-allowed;
+}
+
+.setup-progress-wrap {
+  margin-top: 0.7rem;
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.setup-progress-track {
+  flex: 1;
+  height: 0.45rem;
+  border-radius: 9999px;
+  overflow: hidden;
+  background: #dbeafe;
+}
+
+.setup-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #2563eb 0%, #14b8a6 100%);
+  transition: width 0.2s ease;
+}
+
+.setup-progress-label {
+  width: 3rem;
+  text-align: right;
+  font-size: 0.75rem;
+  color: #0f172a;
+}
+
+.setup-model-path {
+  margin-top: 0.65rem;
+  font-size: 0.78rem;
+  color: #475569;
+  word-break: break-word;
+}
+
+.setup-error {
+  margin-top: 0.9rem;
+  color: #b91c1c;
+  font-size: 0.9rem;
+}
+
+.setup-start-btn {
+  margin-top: 1rem;
+  width: 100%;
+  border: 0;
+  border-radius: 0.6rem;
+  padding: 0.75rem 1rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+  background: #0f766e;
+  color: #fff;
+}
+
+.setup-start-btn:disabled {
+  background: #94a3b8;
+  cursor: not-allowed;
+}
+
 .transcript-stream-bar {
   position: relative;
   display: flex;

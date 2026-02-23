@@ -25,15 +25,42 @@ export default function App() {
   const [isStartingRecording, setIsStartingRecording] = useState(false);
   const [statusText, setStatusText] = useState('Idle');
   const [errorText, setErrorText] = useState('');
-  const [downloadProgress, setDownloadProgress] = useState(null);
-  const [modelChoice, setModelChoice] = useState('tiny.en');
   const [vadSensitivity, setVadSensitivity] = useState(2);
+
+  const [setupVisible, setSetupVisible] = useState(true);
+  const [setupStatus, setSetupStatus] = useState(null);
+  const [setupLoading, setSetupLoading] = useState(true);
+  const [setupError, setSetupError] = useState('');
+  const [modelDownloads, setModelDownloads] = useState({});
 
   const currentPatientIdRef = useRef(currentPatientId);
 
   useEffect(() => {
     currentPatientIdRef.current = currentPatientId;
   }, [currentPatientId]);
+
+  const refreshSetupStatus = async () => {
+    if (!isTauri()) {
+      setSetupStatus({ models_root: '', models: [], all_ready: true });
+      setSetupLoading(false);
+      return;
+    }
+
+    try {
+      setSetupLoading(true);
+      const status = await invoke('get_model_setup_status');
+      setSetupStatus(status || { models_root: '', models: [], all_ready: false });
+      setSetupError('');
+    } catch (err) {
+      setSetupError(String(err));
+    } finally {
+      setSetupLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    refreshSetupStatus();
+  }, []);
 
   useEffect(() => {
     if (!isTauri()) {
@@ -103,10 +130,21 @@ export default function App() {
         unlisteners.push(unlistenError);
       }
 
-      const unlistenProgress = await listen('model-download-progress', (event) => {
+      const unlistenProgress = await listen('model-download-progress', async (event) => {
         const payload = event.payload || {};
-        setDownloadProgress(payload);
-        setStatusText(`Downloading ${payload.model || 'model'}...`);
+        const modelId = payload.model_id;
+        if (!modelId) {
+          return;
+        }
+
+        setModelDownloads((prev) => ({
+          ...prev,
+          [modelId]: payload
+        }));
+
+        if (payload.status === 'completed' || payload.progress >= 1) {
+          await refreshSetupStatus();
+        }
       });
       if (cancelled) {
         unlistenProgress();
@@ -160,10 +198,8 @@ export default function App() {
       setIsStartingRecording(true);
       setErrorText('');
       setStatusText('Starting microphone...');
-      setDownloadProgress(null);
       await invoke('start_transcription', {
         config: {
-          model: modelChoice,
           vad_sensitivity: Number(vadSensitivity),
           max_chunk_seconds: 14
         }
@@ -222,6 +258,38 @@ export default function App() {
     }
   };
 
+  const downloadModel = async (modelId) => {
+    if (!isTauri()) {
+      return;
+    }
+
+    setSetupError('');
+    setModelDownloads((prev) => ({
+      ...prev,
+      [modelId]: {
+        model_id: modelId,
+        progress: 0,
+        downloaded_bytes: 0,
+        total_bytes: null,
+        status: 'downloading'
+      }
+    }));
+
+    try {
+      await invoke('download_required_model', { modelId });
+      await refreshSetupStatus();
+    } catch (err) {
+      setSetupError(String(err));
+      setModelDownloads((prev) => ({
+        ...prev,
+        [modelId]: {
+          ...(prev[modelId] || { model_id: modelId }),
+          status: 'error'
+        }
+      }));
+    }
+  };
+
   const currentPatient = patients.find((p) => p.id === currentPatientId);
   const toggleRecording = () => {
     if (isStartingRecording) {
@@ -233,6 +301,19 @@ export default function App() {
     }
     startRecording();
   };
+
+  if (setupVisible) {
+    return (
+      <StartupSetupScreen
+        setupStatus={setupStatus}
+        setupLoading={setupLoading}
+        setupError={setupError}
+        modelDownloads={modelDownloads}
+        onDownloadModel={downloadModel}
+        onStartUsing={() => setSetupVisible(false)}
+      />
+    );
+  }
 
   return (
     <div className="flex h-screen bg-white text-gray-900 font-sans">
@@ -251,16 +332,92 @@ export default function App() {
             recording={recording}
             isStartingRecording={isStartingRecording}
             onToggleRecording={toggleRecording}
-            modelChoice={modelChoice}
-            setModelChoice={setModelChoice}
             vadSensitivity={vadSensitivity}
             setVadSensitivity={setVadSensitivity}
             statusText={statusText}
             errorText={errorText}
-            downloadProgress={downloadProgress}
           />
         )}
       </main>
+    </div>
+  );
+}
+
+function StartupSetupScreen({
+  setupStatus,
+  setupLoading,
+  setupError,
+  modelDownloads,
+  onDownloadModel,
+  onStartUsing
+}) {
+  const models = setupStatus?.models || [];
+  const canStart = !!setupStatus?.all_ready;
+
+  return (
+    <div className="setup-screen-root">
+      <div className="setup-card-shell">
+        <h1 className="setup-title">Model Setup</h1>
+        <p className="setup-subtitle">
+          Download the required local models before using MedScribeAI.
+        </p>
+
+        {setupStatus?.models_root && (
+          <p className="setup-root-path">Storage location: {setupStatus.models_root}</p>
+        )}
+
+        {setupLoading && <p className="setup-loading">Checking model status...</p>}
+
+        {!setupLoading && (
+          <div className="setup-model-list">
+            {models.map((model) => {
+              const progress = modelDownloads[model.model_id] || null;
+              const isDownloading = progress?.status === 'downloading';
+              const percent =
+                progress && typeof progress.progress === 'number'
+                  ? Math.round(progress.progress * 100)
+                  : 0;
+
+              return (
+                <section className="setup-model-card" key={model.model_id}>
+                  <div className="setup-model-top">
+                    <div>
+                      <h2 className="setup-model-name">{model.label}</h2>
+                      <p className={`setup-model-badge ${model.ready ? 'ready' : 'missing'}`}>
+                        {model.ready ? 'Ready' : 'Not downloaded'}
+                      </p>
+                    </div>
+                    <button
+                      className="setup-download-btn"
+                      disabled={model.ready || isDownloading}
+                      onClick={() => onDownloadModel(model.model_id)}
+                    >
+                      {model.ready ? 'Downloaded' : isDownloading ? 'Downloading...' : 'Download'}
+                    </button>
+                  </div>
+
+                  {isDownloading && (
+                    <div className="setup-progress-wrap">
+                      <div className="setup-progress-track">
+                        <div className="setup-progress-fill" style={{ width: `${percent}%` }} />
+                      </div>
+                      <span className="setup-progress-label">{percent}%</span>
+                    </div>
+                  )}
+
+                  {model.path && <p className="setup-model-path">{model.path}</p>}
+                </section>
+              );
+            })}
+          </div>
+        )}
+
+        {setupError && <p className="setup-error">{setupError}</p>}
+
+        <button className="setup-start-btn" disabled={!canStart} onClick={onStartUsing}>
+          Start using
+        </button>
+      </div>
     </div>
   );
 }
@@ -311,13 +468,10 @@ function MainContent({
   recording,
   isStartingRecording,
   onToggleRecording,
-  modelChoice,
-  setModelChoice,
   vadSensitivity,
   setVadSensitivity,
   statusText,
-  errorText,
-  downloadProgress
+  errorText
 }) {
   const streamLines = getTranscriptStreamLines(patient);
 
@@ -335,11 +489,6 @@ function MainContent({
         <div className="mt-3 text-sm">
           <span className="font-medium text-gray-700">Status:</span>{' '}
           <span className="text-gray-600">{statusText}</span>
-          {downloadProgress && typeof downloadProgress.progress === 'number' && (
-            <span className="ml-3 text-gray-500">
-              {Math.round(downloadProgress.progress * 100)}%
-            </span>
-          )}
           {errorText && <span className="ml-4 text-red-600">{errorText}</span>}
         </div>
       </header>
@@ -350,8 +499,6 @@ function MainContent({
           recording={recording}
           isStartingRecording={isStartingRecording}
           onToggleRecording={onToggleRecording}
-          modelChoice={modelChoice}
-          setModelChoice={setModelChoice}
           vadSensitivity={vadSensitivity}
           setVadSensitivity={setVadSensitivity}
           statusText={statusText}
@@ -399,8 +546,6 @@ function TopTranscriptStreamBar({
   recording,
   isStartingRecording,
   onToggleRecording,
-  modelChoice,
-  setModelChoice,
   vadSensitivity,
   setVadSensitivity,
   statusText
@@ -431,16 +576,6 @@ function TopTranscriptStreamBar({
       </div>
       <div className="transcript-controls">
         <div className="transcript-controls-selects">
-          <label htmlFor="top-model-select" className="text-xs">Model</label>
-          <select
-            id="top-model-select"
-            value={modelChoice}
-            onChange={(e) => setModelChoice(e.target.value)}
-            className="top-stream-select"
-          >
-            <option value="tiny.en">tiny.en</option>
-            <option value="base.en">base.en</option>
-          </select>
           <label htmlFor="top-vad-select" className="text-xs">VAD</label>
           <select
             id="top-vad-select"
