@@ -27,7 +27,7 @@
       "infoPlist": "Info.plist"
     },
     "resources": [
-      "binaries/llama-cli"
+      "binaries"
     ],
     "targets": "all",
     "icon": [
