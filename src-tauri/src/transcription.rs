@@ -459,8 +459,23 @@ Conversation:\n\
     Ok(soap_text)
 }
 
-fn resolve_sidecar_path(_app: &AppHandle) -> Result<PathBuf, String> {
+fn resolve_sidecar_path(app: &AppHandle) -> Result<PathBuf, String> {
     let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join("binaries").join("llama-cli"));
+        candidates.push(resource_dir.join("llama-cli"));
+    }
+
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            candidates.push(exe_dir.join("llama-cli"));
+            candidates.push(exe_dir.join("binaries").join("llama-cli"));
+            candidates.push(exe_dir.join("../Resources").join("binaries").join("llama-cli"));
+            candidates.push(exe_dir.join("../Resources").join("llama-cli"));
+        }
+    }
+
     if let Ok(p) = std::env::current_dir() {
         candidates.push(p.join("src-tauri").join("binaries").join("llama-cli"));
         candidates.push(p.join("binaries").join("llama-cli"));
