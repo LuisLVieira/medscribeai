@@ -3,7 +3,7 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
 const DEFAULT_SOAP_TEMPLATE =
-  `<h3>Subjective</h3>\n<p>Enter patient symptoms and history...</p>\n\n<h3>Objective</h3>\n<p>Enter physical exam findings...</p>\n\n<h3>Assessment</h3>\n<p>Enter diagnosis...</p>\n\n<h3>Plan</h3>\n<p>Enter treatment plan...</p>`;
+  '';
 
 export default function App() {
   const [patients, setPatients] = useState([]);
@@ -11,6 +11,8 @@ export default function App() {
   const [patientsLoaded, setPatientsLoaded] = useState(false);
   const [recording, setRecording] = useState(false);
   const [isStartingRecording, setIsStartingRecording] = useState(false);
+  const [isGeneratingSoap, setIsGeneratingSoap] = useState(false);
+  const [copyMessage, setCopyMessage] = useState('');
   const [statusText, setStatusText] = useState('Idle');
   const [errorText, setErrorText] = useState('');
   const [vadSensitivity, setVadSensitivity] = useState(2);
@@ -309,6 +311,7 @@ export default function App() {
 
     try {
       setStatusText('Generating SOAP note...');
+      setIsGeneratingSoap(true);
       const soapText = await invoke('generate_soap_note', {
         transcript: transcriptForSoap
       });
@@ -326,6 +329,25 @@ export default function App() {
     } catch (err) {
       setErrorText(String(err));
       setStatusText('SOAP note generation failed');
+    } finally {
+      setIsGeneratingSoap(false);
+    }
+  };
+
+  const copySoapToClipboard = async (patient) => {
+    const patientName = (patient?.name || '').trim();
+    const soapText = htmlToPlainText(String(patient?.soap || '')).trim();
+    const body = patientName ? `${patientName}\n\n${soapText}` : soapText;
+    if (!body) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(body);
+      setCopyMessage('Copied');
+      setTimeout(() => setCopyMessage(''), 1600);
+    } catch (err) {
+      setErrorText(`Failed to copy SOAP note: ${String(err)}`);
     }
   };
 
@@ -407,6 +429,8 @@ export default function App() {
         onDownloadModel={downloadModel}
         onDeleteModel={deleteModel}
         onStartUsing={() => setSetupVisible(false)}
+        vadSensitivity={vadSensitivity}
+        setVadSensitivity={setVadSensitivity}
       />
     );
   }
@@ -429,10 +453,10 @@ export default function App() {
             recording={recording}
             isStartingRecording={isStartingRecording}
             onToggleRecording={toggleRecording}
-            vadSensitivity={vadSensitivity}
-            setVadSensitivity={setVadSensitivity}
             statusText={statusText}
-            errorText={errorText}
+            isGeneratingSoap={isGeneratingSoap}
+            onCopySoap={() => copySoapToClipboard(currentPatient)}
+            copyMessage={copyMessage}
             onOpenSetup={() => {
               refreshSetupStatus();
               setSetupVisible(true);
@@ -454,7 +478,9 @@ function StartupSetupScreen({
   modelDeleting,
   onDownloadModel,
   onDeleteModel,
-  onStartUsing
+  onStartUsing,
+  vadSensitivity,
+  setVadSensitivity
 }) {
   const models = setupStatus?.models || [];
   const canStart = !!setupStatus?.all_ready;
@@ -470,6 +496,27 @@ function StartupSetupScreen({
         {setupStatus?.models_root && (
           <p className="setup-root-path">Find all app local storage at {setupStatus.models_root}</p>
         )}
+
+        <div className="setup-vad-panel">
+          <div>
+            <h3 className="setup-vad-title">Voice sensitivity</h3>
+            <p className="setup-vad-description">
+              Controls how easily speech is detected. Lower values are stricter; higher values are
+              more sensitive to quieter voices and background sounds.
+            </p>
+          </div>
+          <select
+            id="setup-vad-select"
+            value={vadSensitivity}
+            onChange={(e) => setVadSensitivity(Number(e.target.value))}
+            className="setup-vad-select"
+          >
+            <option value={0}>0 - Strict</option>
+            <option value={1}>1 - Conservative</option>
+            <option value={2}>2 - Balanced</option>
+            <option value={3}>3 - Sensitive</option>
+          </select>
+        </div>
 
         {setupLoading && <p className="setup-loading">Checking model status...</p>}
 
@@ -600,10 +647,10 @@ function MainContent({
   recording,
   isStartingRecording,
   onToggleRecording,
-  vadSensitivity,
-  setVadSensitivity,
   statusText,
-  errorText,
+  isGeneratingSoap,
+  onCopySoap,
+  copyMessage,
   onOpenSetup
 }) {
   const latestChunk = getLatestTranscriptChunk(patient);
@@ -612,22 +659,10 @@ function MainContent({
     <div className="flex-1 flex flex-col">
       <header className="px-8 py-6 border-b border-gray-200">
         <div className="workspace-header-row">
-          <input
-            type="text"
-            value={patient.name}
-            onChange={(e) => onUpdatePatient(patient.id, 'name', e.target.value)}
-            className="text-3xl font-semibold text-gray-900 border-none outline-none w-full bg-transparent focus:ring-0"
-            placeholder="Patient Name"
-            aria-label="Patient name"
-          />
+          <h2 className="text-xl font-semibold text-gray-900">Consultation</h2>
           <button className="workspace-setup-btn" onClick={onOpenSetup}>
             Model Setup
           </button>
-        </div>
-        <div className="mt-3 text-sm">
-          <span className="font-medium text-gray-700">Status:</span>{' '}
-          <span className="text-gray-600">{statusText}</span>
-          {errorText && <span className="ml-4 text-red-600">{errorText}</span>}
         </div>
       </header>
 
@@ -637,15 +672,41 @@ function MainContent({
           recording={recording}
           isStartingRecording={isStartingRecording}
           onToggleRecording={onToggleRecording}
-          vadSensitivity={vadSensitivity}
-          setVadSensitivity={setVadSensitivity}
           statusText={statusText}
         />
       </div>
 
       <div className="flex-1 flex flex-col min-h-0">
+        <div className="px-6 py-3 border-b border-gray-200 soap-patient-row">
+          <label htmlFor="soap-patient-name" className="soap-patient-label">Patient Name</label>
+          <input
+            id="soap-patient-name"
+            type="text"
+            value={patient.name}
+            onChange={(e) => onUpdatePatient(patient.id, 'name', e.target.value)}
+            className="soap-patient-input"
+            placeholder="Patient Name"
+            aria-label="Patient name"
+          />
+        </div>
         <div className="px-6 py-4 border-b border-gray-200">
-          <h3 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">SOAP Note</h3>
+          <div className="soap-header-row">
+            <div className="soap-header-left">
+              <h3 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">SOAP Note</h3>
+              {isGeneratingSoap && (
+                <div className="soap-loading-wrap" role="status" aria-live="polite">
+                  <span className="soap-spinner" />
+                  <span>Generating...</span>
+                </div>
+              )}
+            </div>
+            <div className="soap-header-actions">
+              {!!copyMessage && <span className="soap-copy-feedback">{copyMessage}</span>}
+              <button className="soap-copy-btn" onClick={onCopySoap}>
+                Copy
+              </button>
+            </div>
+          </div>
         </div>
         <div className="flex-1 overflow-y-auto p-6">
           <div
@@ -709,8 +770,6 @@ function TopTranscriptStreamBar({
   recording,
   isStartingRecording,
   onToggleRecording,
-  vadSensitivity,
-  setVadSensitivity,
   statusText
 }) {
   const isActive = recording || isStartingRecording;
@@ -730,20 +789,6 @@ function TopTranscriptStreamBar({
         <div className="transcript-stream-single-line">{text}</div>
       </div>
       <div className="transcript-controls">
-        <div className="transcript-controls-selects">
-          <label htmlFor="top-vad-select" className="text-xs">VAD</label>
-          <select
-            id="top-vad-select"
-            value={vadSensitivity}
-            onChange={(e) => setVadSensitivity(Number(e.target.value))}
-            className="top-stream-select"
-          >
-            <option value={0}>0</option>
-            <option value={1}>1</option>
-            <option value={2}>2</option>
-            <option value={3}>3</option>
-          </select>
-        </div>
         <button
           onClick={onToggleRecording}
           disabled={isStartingRecording}
@@ -756,6 +801,22 @@ function TopTranscriptStreamBar({
       {isActive && <div className="transcript-stream-status">{statusText}</div>}
     </section>
   );
+}
+
+function htmlToPlainText(html) {
+  const clean = String(html || '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|h1|h2|h3|h4|h5|h6|li)>/gi, '\n');
+  const stripped = clean.replace(/<[^>]+>/g, '');
+  return stripped
+    .replaceAll('&nbsp;', ' ')
+    .replaceAll('&amp;', '&')
+    .replaceAll('&lt;', '<')
+    .replaceAll('&gt;', '>')
+    .replaceAll('&quot;', '"')
+    .replaceAll('&#39;', "'")
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 function formatSoapTextAsHtml(text) {

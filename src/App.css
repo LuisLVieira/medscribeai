@@ -103,6 +103,41 @@
   word-break: break-word;
 }
 
+.setup-vad-panel {
+  margin-top: 0.9rem;
+  border: 1px solid #dbeafe;
+  border-radius: 0.75rem;
+  background: #f8fbff;
+  padding: 0.85rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+}
+
+.setup-vad-title {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: #1e3a8a;
+}
+
+.setup-vad-description {
+  margin-top: 0.25rem;
+  font-size: 0.8rem;
+  color: #475569;
+  max-width: 36rem;
+}
+
+.setup-vad-select {
+  border: 1px solid #bfdbfe;
+  border-radius: 0.45rem;
+  background: #ffffff;
+  color: #1e293b;
+  padding: 0.4rem 0.55rem;
+  font-size: 0.82rem;
+  min-width: 9.5rem;
+}
+
 .setup-loading {
   margin-top: 1rem;
   color: #334155;
@@ -279,6 +314,98 @@
   padding: 0.45rem 0.75rem;
   font-size: 0.82rem;
   font-weight: 600;
+}
+
+.soap-patient-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.7rem;
+}
+
+.soap-patient-label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #374151;
+  text-transform: uppercase;
+}
+
+.soap-patient-input {
+  width: 100%;
+  border: 1px solid #cbd5e1;
+  border-radius: 0.5rem;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.95rem;
+  color: #0f172a;
+  outline: 1px solid transparent;
+  box-shadow: none;
+}
+
+.soap-patient-input:focus {
+  outline: 1px solid transparent;
+  border-color: #cbd5e1;
+}
+
+.soap-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.soap-header-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.soap-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.soap-copy-btn {
+  border: 1px solid #cbd5e1;
+  border-radius: 0.4rem;
+  background: #ffffff;
+  color: #1e293b;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.76rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.soap-copy-feedback {
+  font-size: 0.8rem;
+  color: #065f46;
+}
+
+.soap-loading-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.8rem;
+  color: #334155;
+}
+
+.soap-spinner {
+  width: 0.9rem;
+  height: 0.9rem;
+  border-radius: 9999px;
+  border: 2px solid #cbd5e1;
+  border-top-color: #2563eb;
+  animation: soap-spin 0.75s linear infinite;
+}
+
+@keyframes soap-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .sidebar-delete-btn {
