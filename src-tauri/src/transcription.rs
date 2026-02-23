@@ -30,6 +30,8 @@ const WHISPER_TINY_URL: &str =
     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin";
 const MEDGEMMA_HF_REPO: &str = "unsloth/medgemma-1.5-4b-it-GGUF";
 const MEDGEMMA_HF_FILE: &str = "medgemma-1.5-4b-it-Q4_K_M.gguf";
+const WHISPER_TINY_REQUIRED_BYTES: u64 = 80 * 1024 * 1024;
+const MEDGEMMA_REQUIRED_BYTES: u64 = 3_500 * 1024 * 1024;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct TranscriptionConfig {
@@ -97,9 +99,12 @@ struct DownloadProgressPayload {
 #[derive(Debug, Serialize, Clone)]
 struct RequiredModelStatusPayload {
     model_id: String,
-    label: String,
+    friendly_name: String,
+    technical_name: String,
     ready: bool,
     path: Option<String>,
+    required_bytes: u64,
+    occupied_bytes: u64,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -246,6 +251,13 @@ pub async fn download_required_model_command(
     model_id: String,
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || download_required_model(&app, &model_id))
+        .await
+        .map_err(|err| format!("task join error: {err}"))?
+        .map_err(|err| err.to_string())
+}
+
+pub async fn delete_required_model_command(app: AppHandle, model_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || delete_required_model(&app, &model_id))
         .await
         .map_err(|err| format!("task join error: {err}"))?
         .map_err(|err| err.to_string())
@@ -453,26 +465,36 @@ fn get_model_setup_status(app: &AppHandle) -> Result<ModelSetupStatusPayload, Tr
 
     let whisper_path = whisper_tiny_path(app)?;
     let whisper_ready = whisper_path.exists();
+    let whisper_occupied = file_size_if_exists(&whisper_path);
 
     let medgemma_path = read_medgemma_marker_path(app).ok();
     let medgemma_ready = medgemma_path.as_ref().is_some_and(|path| path.exists());
+    let medgemma_occupied = medgemma_path
+        .as_ref()
+        .map_or(0, |path| file_size_if_exists(path));
 
     let payload = ModelSetupStatusPayload {
         models_root: models_root.to_string_lossy().to_string(),
         models: vec![
             RequiredModelStatusPayload {
                 model_id: MODEL_ID_WHISPER_TINY.to_string(),
-                label: "Whisper tiny.en".to_string(),
+                friendly_name: "Transcription engine".to_string(),
+                technical_name: "Whisper Tiny".to_string(),
                 ready: whisper_ready,
                 path: whisper_ready.then(|| whisper_path.to_string_lossy().to_string()),
+                required_bytes: WHISPER_TINY_REQUIRED_BYTES,
+                occupied_bytes: whisper_occupied,
             },
             RequiredModelStatusPayload {
                 model_id: MODEL_ID_MEDGEMMA.to_string(),
-                label: "MedGemma GGUF".to_string(),
+                friendly_name: "Summarization engine".to_string(),
+                technical_name: "MedGemma 1.5".to_string(),
                 ready: medgemma_ready,
                 path: medgemma_path
                     .filter(|path| path.exists())
                     .map(|path| path.to_string_lossy().to_string()),
+                required_bytes: MEDGEMMA_REQUIRED_BYTES,
+                occupied_bytes: medgemma_occupied,
             },
         ],
         all_ready: whisper_ready && medgemma_ready,
@@ -499,6 +521,48 @@ fn download_required_model(app: &AppHandle, model_id: &str) -> Result<(), Transc
                 }
             }
             download_medgemma_model(app)
+        }
+        _ => Err(TranscriptionError::ModelDownload(format!(
+            "unknown model id: {model_id}"
+        ))),
+    }
+}
+
+fn delete_required_model(app: &AppHandle, model_id: &str) -> Result<(), TranscriptionError> {
+    match model_id {
+        MODEL_ID_WHISPER_TINY => {
+            let path = whisper_tiny_path(app)?;
+            if path.exists() {
+                fs::remove_file(path).map_err(|err| {
+                    TranscriptionError::ModelDownload(format!("delete failed: {err}"))
+                })?;
+            }
+            Ok(())
+        }
+        MODEL_ID_MEDGEMMA => {
+            if let Ok(path) = read_medgemma_marker_path(app) {
+                if path.exists() {
+                    fs::remove_file(path).map_err(|err| {
+                        TranscriptionError::ModelDownload(format!("delete failed: {err}"))
+                    })?;
+                }
+            }
+
+            if let Ok(marker) = medgemma_marker_path(app) {
+                if marker.exists() {
+                    fs::remove_file(marker).map_err(|err| {
+                        TranscriptionError::ModelDownload(format!("marker delete failed: {err}"))
+                    })?;
+                }
+            }
+
+            let cache_root = medgemma_cache_root(app)?;
+            if cache_root.exists() {
+                fs::remove_dir_all(cache_root).map_err(|err| {
+                    TranscriptionError::ModelDownload(format!("cache delete failed: {err}"))
+                })?;
+            }
+            Ok(())
         }
         _ => Err(TranscriptionError::ModelDownload(format!(
             "unknown model id: {model_id}"
@@ -654,6 +718,10 @@ fn read_medgemma_marker_path(app: &AppHandle) -> Result<PathBuf, TranscriptionEr
     let marker: MedgemmaMarker = serde_json::from_str(&raw)
         .map_err(|err| TranscriptionError::ModelDownload(err.to_string()))?;
     Ok(PathBuf::from(marker.local_path))
+}
+
+fn file_size_if_exists(path: &Path) -> u64 {
+    fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
 }
 
 fn emit_model_progress(

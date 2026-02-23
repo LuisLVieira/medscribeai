@@ -135,6 +135,12 @@
   color: #0f172a;
 }
 
+.setup-model-technical {
+  margin-top: 0.15rem;
+  font-size: 0.8rem;
+  color: #64748b;
+}
+
 .setup-model-badge {
   margin-top: 0.3rem;
   display: inline-flex;
@@ -168,6 +174,29 @@
 
 .setup-download-btn:disabled {
   background: #94a3b8;
+  cursor: not-allowed;
+}
+
+.setup-model-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.45rem;
+}
+
+.setup-delete-btn {
+  border: 1px solid #cbd5e1;
+  border-radius: 0.45rem;
+  background: #fff;
+  color: #334155;
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.4rem 0.7rem;
+}
+
+.setup-delete-btn:disabled {
+  color: #94a3b8;
+  border-color: #e2e8f0;
   cursor: not-allowed;
 }
 
@@ -206,6 +235,12 @@
   word-break: break-word;
 }
 
+.setup-storage-line {
+  margin-top: 0.5rem;
+  font-size: 0.8rem;
+  color: #334155;
+}
+
 .setup-error {
   margin-top: 0.9rem;
   color: #b91c1c;
@@ -227,6 +262,23 @@
 .setup-start-btn:disabled {
   background: #94a3b8;
   cursor: not-allowed;
+}
+
+.workspace-header-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.workspace-setup-btn {
+  flex-shrink: 0;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  color: #1e293b;
+  border-radius: 0.45rem;
+  padding: 0.45rem 0.75rem;
+  font-size: 0.82rem;
+  font-weight: 600;
 }
 
 .transcript-stream-bar {

@@ -32,6 +32,7 @@ export default function App() {
   const [setupLoading, setSetupLoading] = useState(true);
   const [setupError, setSetupError] = useState('');
   const [modelDownloads, setModelDownloads] = useState({});
+  const [modelDeleting, setModelDeleting] = useState({});
 
   const currentPatientIdRef = useRef(currentPatientId);
 
@@ -290,6 +291,29 @@ export default function App() {
     }
   };
 
+  const deleteModel = async (modelId) => {
+    if (!isTauri()) {
+      return;
+    }
+
+    setSetupError('');
+    setModelDeleting((prev) => ({ ...prev, [modelId]: true }));
+
+    try {
+      await invoke('delete_required_model', { modelId });
+      await refreshSetupStatus();
+      setModelDownloads((prev) => {
+        const next = { ...prev };
+        delete next[modelId];
+        return next;
+      });
+    } catch (err) {
+      setSetupError(String(err));
+    } finally {
+      setModelDeleting((prev) => ({ ...prev, [modelId]: false }));
+    }
+  };
+
   const currentPatient = patients.find((p) => p.id === currentPatientId);
   const toggleRecording = () => {
     if (isStartingRecording) {
@@ -309,7 +333,9 @@ export default function App() {
         setupLoading={setupLoading}
         setupError={setupError}
         modelDownloads={modelDownloads}
+        modelDeleting={modelDeleting}
         onDownloadModel={downloadModel}
+        onDeleteModel={deleteModel}
         onStartUsing={() => setSetupVisible(false)}
       />
     );
@@ -336,6 +362,10 @@ export default function App() {
             setVadSensitivity={setVadSensitivity}
             statusText={statusText}
             errorText={errorText}
+            onOpenSetup={() => {
+              refreshSetupStatus();
+              setSetupVisible(true);
+            }}
           />
         )}
       </main>
@@ -348,7 +378,9 @@ function StartupSetupScreen({
   setupLoading,
   setupError,
   modelDownloads,
+  modelDeleting,
   onDownloadModel,
+  onDeleteModel,
   onStartUsing
 }) {
   const models = setupStatus?.models || [];
@@ -357,13 +389,13 @@ function StartupSetupScreen({
   return (
     <div className="setup-screen-root">
       <div className="setup-card-shell">
-        <h1 className="setup-title">Model Setup</h1>
+        <h1 className="setup-title">Welcome to MedScribeAI</h1>
         <p className="setup-subtitle">
-          Download the required local models before using MedScribeAI.
+          Please download the required resources below before using MedScribeAI.
         </p>
 
         {setupStatus?.models_root && (
-          <p className="setup-root-path">Storage location: {setupStatus.models_root}</p>
+          <p className="setup-root-path">Find all app local storage at {setupStatus.models_root}</p>
         )}
 
         {setupLoading && <p className="setup-loading">Checking model status...</p>}
@@ -373,6 +405,7 @@ function StartupSetupScreen({
             {models.map((model) => {
               const progress = modelDownloads[model.model_id] || null;
               const isDownloading = progress?.status === 'downloading';
+              const isDeleting = !!modelDeleting[model.model_id];
               const percent =
                 progress && typeof progress.progress === 'number'
                   ? Math.round(progress.progress * 100)
@@ -382,18 +415,28 @@ function StartupSetupScreen({
                 <section className="setup-model-card" key={model.model_id}>
                   <div className="setup-model-top">
                     <div>
-                      <h2 className="setup-model-name">{model.label}</h2>
+                      <h2 className="setup-model-name">{model.friendly_name}</h2>
+                      <p className="setup-model-technical">{model.technical_name}</p>
                       <p className={`setup-model-badge ${model.ready ? 'ready' : 'missing'}`}>
                         {model.ready ? 'Ready' : 'Not downloaded'}
                       </p>
                     </div>
-                    <button
-                      className="setup-download-btn"
-                      disabled={model.ready || isDownloading}
-                      onClick={() => onDownloadModel(model.model_id)}
-                    >
-                      {model.ready ? 'Downloaded' : isDownloading ? 'Downloading...' : 'Download'}
-                    </button>
+                    <div className="setup-model-actions">
+                      <button
+                        className="setup-download-btn"
+                        disabled={model.ready || isDownloading || isDeleting}
+                        onClick={() => onDownloadModel(model.model_id)}
+                      >
+                        {model.ready ? 'Downloaded' : isDownloading ? 'Downloading...' : 'Download'}
+                      </button>
+                      <button
+                        className="setup-delete-btn"
+                        disabled={!model.ready || isDownloading || isDeleting}
+                        onClick={() => onDeleteModel(model.model_id)}
+                      >
+                        {isDeleting ? 'Deleting...' : 'Delete model'}
+                      </button>
+                    </div>
                   </div>
 
                   {isDownloading && (
@@ -405,6 +448,12 @@ function StartupSetupScreen({
                     </div>
                   )}
 
+                  <p className="setup-storage-line">
+                    Required free space: {formatBytes(model.required_bytes)}
+                  </p>
+                  <p className="setup-storage-line">
+                    Occupied on disk: {formatBytes(model.occupied_bytes || 0)}
+                  </p>
                   {model.path && <p className="setup-model-path">{model.path}</p>}
                 </section>
               );
@@ -471,21 +520,27 @@ function MainContent({
   vadSensitivity,
   setVadSensitivity,
   statusText,
-  errorText
+  errorText,
+  onOpenSetup
 }) {
   const streamLines = getTranscriptStreamLines(patient);
 
   return (
     <div className="flex-1 flex flex-col">
       <header className="px-8 py-6 border-b border-gray-200">
-        <input
-          type="text"
-          value={patient.name}
-          onChange={(e) => onUpdatePatient(patient.id, 'name', e.target.value)}
-          className="text-3xl font-semibold text-gray-900 border-none outline-none w-full bg-transparent focus:ring-0"
-          placeholder="Patient Name"
-          aria-label="Patient name"
-        />
+        <div className="workspace-header-row">
+          <input
+            type="text"
+            value={patient.name}
+            onChange={(e) => onUpdatePatient(patient.id, 'name', e.target.value)}
+            className="text-3xl font-semibold text-gray-900 border-none outline-none w-full bg-transparent focus:ring-0"
+            placeholder="Patient Name"
+            aria-label="Patient name"
+          />
+          <button className="workspace-setup-btn" onClick={onOpenSetup}>
+            Model Setup
+          </button>
+        </div>
         <div className="mt-3 text-sm">
           <span className="font-medium text-gray-700">Status:</span>{' '}
           <span className="text-gray-600">{statusText}</span>
@@ -522,6 +577,17 @@ function MainContent({
       </div>
     </div>
   );
+}
+
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return '0 B';
+  }
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const exp = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const amount = bytes / 1024 ** exp;
+  return `${amount.toFixed(exp === 0 ? 0 : amount >= 10 ? 1 : 2)} ${units[exp]}`;
 }
 
 function getTranscriptStreamLines(patient) {

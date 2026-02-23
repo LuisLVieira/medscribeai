@@ -29,6 +29,11 @@ async fn download_required_model(app: tauri::AppHandle, model_id: String) -> Res
     transcription::download_required_model_command(app, model_id).await
 }
 
+#[tauri::command]
+async fn delete_required_model(app: tauri::AppHandle, model_id: String) -> Result<(), String> {
+    transcription::delete_required_model_command(app, model_id).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
@@ -45,7 +50,8 @@ pub fn run() {
             stop_transcription,
             generate_soap_note,
             get_model_setup_status,
-            download_required_model
+            download_required_model,
+            delete_required_model
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
