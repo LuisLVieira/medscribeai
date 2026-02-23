@@ -38,6 +38,7 @@ const MEDGEMMA_REQUIRED_BYTES: u64 = 3_500 * 1024 * 1024;
 pub struct TranscriptionConfig {
     pub vad_sensitivity: Option<u8>,
     pub max_chunk_seconds: Option<f32>,
+    pub input_device_key: Option<String>,
 }
 
 impl Default for TranscriptionConfig {
@@ -45,6 +46,7 @@ impl Default for TranscriptionConfig {
         Self {
             vad_sensitivity: Some(2),
             max_chunk_seconds: Some(14.0),
+            input_device_key: None,
         }
     }
 }
@@ -115,6 +117,26 @@ pub struct ModelSetupStatusPayload {
     all_ready: bool,
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct InputDevicePayload {
+    key: String,
+    name: String,
+    is_default: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct InputDeviceListPayload {
+    devices: Vec<InputDevicePayload>,
+    default_device_key: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct MicLevelPayload {
+    rms: f32,
+    peak: f32,
+    active: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct MedgemmaMarker {
     local_path: String,
@@ -130,8 +152,14 @@ pub enum TranscriptionError {
     AudioDeviceUnavailable,
     #[error("failed to start input stream: {0}")]
     AudioStreamStart(String),
+    #[error("failed to enumerate audio devices: {0}")]
+    AudioDeviceEnumeration(String),
     #[error("unsupported sample format")]
     UnsupportedSampleFormat,
+    #[error("microphone test already running")]
+    AlreadyTesting,
+    #[error("microphone test is not running")]
+    NotTesting,
     #[error("model download failed: {0}")]
     ModelDownload(String),
     #[error("model path could not be resolved")]
@@ -159,6 +187,18 @@ pub struct TranscriptionManager {
 
 pub static TRANSCRIPTION_MANAGER: Lazy<TranscriptionManager> = Lazy::new(|| TranscriptionManager {
     state: Mutex::new(ManagerState { runtime: None }),
+});
+
+struct MicTestManagerState {
+    runtime: Option<RuntimeHandle>,
+}
+
+pub struct MicTestManager {
+    state: Mutex<MicTestManagerState>,
+}
+
+pub static MIC_TEST_MANAGER: Lazy<MicTestManager> = Lazy::new(|| MicTestManager {
+    state: Mutex::new(MicTestManagerState { runtime: None }),
 });
 
 impl TranscriptionManager {
@@ -220,6 +260,60 @@ impl TranscriptionManager {
     }
 }
 
+impl MicTestManager {
+    pub fn start(
+        &self,
+        app: AppHandle,
+        requested_device_key: Option<String>,
+    ) -> Result<(), TranscriptionError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| TranscriptionError::Internal("mic test lock poisoned".to_string()))?;
+        if state.runtime.is_some() {
+            return Err(TranscriptionError::AlreadyTesting);
+        }
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop_flag);
+        let app_for_worker = app.clone();
+        let worker = thread::spawn(move || {
+            if let Err(err) = run_mic_test_loop(app_for_worker.clone(), requested_device_key, worker_stop)
+            {
+                let _ = app_for_worker.emit(
+                    "mic-test-error",
+                    ErrorPayload {
+                        message: err.to_string(),
+                    },
+                );
+            }
+        });
+
+        state.runtime = Some(RuntimeHandle {
+            stop_flag,
+            worker: Some(worker),
+        });
+        Ok(())
+    }
+
+    pub fn stop(&self) -> Result<(), TranscriptionError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| TranscriptionError::Internal("mic test lock poisoned".to_string()))?;
+
+        let mut runtime = match state.runtime.take() {
+            Some(runtime) => runtime,
+            None => return Err(TranscriptionError::NotTesting),
+        };
+        runtime.stop_flag.store(true, Ordering::SeqCst);
+        if let Some(worker) = runtime.worker.take() {
+            let _ = worker.join();
+        }
+        Ok(())
+    }
+}
+
 pub async fn start_transcription_command(
     app: AppHandle,
     config: Option<Value>,
@@ -242,6 +336,30 @@ pub async fn get_model_setup_status_command(
     app: AppHandle,
 ) -> Result<ModelSetupStatusPayload, String> {
     tauri::async_runtime::spawn_blocking(move || get_model_setup_status(&app))
+        .await
+        .map_err(|err| format!("task join error: {err}"))?
+        .map_err(|err| err.to_string())
+}
+
+pub async fn list_input_devices_command(_app: AppHandle) -> Result<InputDeviceListPayload, String> {
+    tauri::async_runtime::spawn_blocking(list_input_devices)
+        .await
+        .map_err(|err| format!("task join error: {err}"))?
+        .map_err(|err| err.to_string())
+}
+
+pub async fn start_mic_test_command(app: AppHandle, device_key: Option<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || MIC_TEST_MANAGER.start(app, device_key))
+        .await
+        .map_err(|err| format!("task join error: {err}"))?
+        .map_err(|err| err.to_string())
+}
+
+pub async fn stop_mic_test_command() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| match MIC_TEST_MANAGER.stop() {
+        Ok(()) | Err(TranscriptionError::NotTesting) => Ok(()),
+        Err(err) => Err(err),
+    })
         .await
         .map_err(|err| format!("task join error: {err}"))?
         .map_err(|err| err.to_string())
@@ -761,6 +879,284 @@ impl Progress for TauriDownloadProgress {
     }
 }
 
+struct RuntimeInputDevice {
+    key: String,
+    name: String,
+    is_default: bool,
+    device: cpal::Device,
+}
+
+fn make_input_device_key(name: &str, ordinal: usize) -> String {
+    let normalized = name.trim().to_lowercase().replace('|', "_");
+    format!("{normalized}|{ordinal}")
+}
+
+fn enumerate_input_devices(host: &cpal::Host) -> Result<Vec<RuntimeInputDevice>, TranscriptionError> {
+    let default_name = host
+        .default_input_device()
+        .and_then(|device| device.name().ok());
+
+    let devices = host
+        .input_devices()
+        .map_err(|err| TranscriptionError::AudioDeviceEnumeration(err.to_string()))?;
+
+    let mut out = Vec::new();
+    for (idx, device) in devices.enumerate() {
+        let name = device
+            .name()
+            .unwrap_or_else(|_| format!("Input device {}", idx + 1));
+        let key = make_input_device_key(&name, idx);
+        let is_default = default_name
+            .as_ref()
+            .map(|default| default == &name)
+            .unwrap_or(false);
+        out.push(RuntimeInputDevice {
+            key,
+            name,
+            is_default,
+            device,
+        });
+    }
+    Ok(out)
+}
+
+fn list_input_devices() -> Result<InputDeviceListPayload, TranscriptionError> {
+    let host = cpal::default_host();
+    let runtime_devices = enumerate_input_devices(&host)?;
+    let default_device_key = runtime_devices
+        .iter()
+        .find(|item| item.is_default)
+        .map(|item| item.key.clone());
+    let devices = runtime_devices
+        .into_iter()
+        .map(|item| InputDevicePayload {
+            key: item.key,
+            name: item.name,
+            is_default: item.is_default,
+        })
+        .collect();
+
+    Ok(InputDeviceListPayload {
+        devices,
+        default_device_key,
+    })
+}
+
+fn resolve_input_device(
+    host: &cpal::Host,
+    selected_key: Option<&str>,
+) -> Result<(cpal::Device, String, bool), TranscriptionError> {
+    let mut devices = enumerate_input_devices(host)?;
+    if devices.is_empty() {
+        return Err(TranscriptionError::AudioDeviceUnavailable);
+    }
+
+    if let Some(requested_key) = selected_key {
+        if let Some(index) = devices.iter().position(|item| item.key == requested_key) {
+            let selected = devices.remove(index);
+            return Ok((selected.device, selected.name, false));
+        }
+    }
+
+    let fallback_index = devices.iter().position(|item| item.is_default).unwrap_or(0);
+    let selected = devices.remove(fallback_index);
+    Ok((selected.device, selected.name, selected_key.is_some()))
+}
+
+fn emit_mic_level(app: &AppHandle, rms: f32, peak: f32, active: bool) {
+    let payload = MicLevelPayload { rms, peak, active };
+    let _ = app.emit("mic-test-level", payload);
+}
+
+fn compute_level_stats(frame: &[f32]) -> (f32, f32) {
+    if frame.is_empty() {
+        return (0.0, 0.0);
+    }
+
+    let mut sum = 0.0f32;
+    let mut peak = 0.0f32;
+    for sample in frame {
+        let abs = sample.abs();
+        sum += abs * abs;
+        if abs > peak {
+            peak = abs;
+        }
+    }
+
+    let rms = (sum / frame.len() as f32).sqrt();
+    (rms, peak)
+}
+
+fn run_mic_test_loop(
+    app: AppHandle,
+    requested_device_key: Option<String>,
+    stop_flag: Arc<AtomicBool>,
+) -> Result<(), TranscriptionError> {
+    let host = cpal::default_host();
+    let (device, _selected_name, did_fallback) =
+        resolve_input_device(&host, requested_device_key.as_deref())?;
+    if did_fallback {
+        emit_error(
+            &app,
+            "selected microphone was not found; using default input device for mic test",
+        );
+    }
+
+    let stream_config = device
+        .default_input_config()
+        .map_err(|err| TranscriptionError::AudioStreamStart(err.to_string()))?;
+    let channels = stream_config.channels() as usize;
+    let err_app = app.clone();
+    let stream = match stream_config.sample_format() {
+        cpal::SampleFormat::F32 => build_mic_test_stream_f32(
+            &device,
+            &stream_config.into(),
+            channels,
+            app.clone(),
+            err_app,
+        )?,
+        cpal::SampleFormat::I16 => build_mic_test_stream_i16(
+            &device,
+            &stream_config.into(),
+            channels,
+            app.clone(),
+            err_app,
+        )?,
+        cpal::SampleFormat::U16 => build_mic_test_stream_u16(
+            &device,
+            &stream_config.into(),
+            channels,
+            app.clone(),
+            err_app,
+        )?,
+        _ => return Err(TranscriptionError::UnsupportedSampleFormat),
+    };
+
+    stream
+        .play()
+        .map_err(|err| TranscriptionError::AudioStreamStart(err.to_string()))?;
+
+    while !stop_flag.load(Ordering::Relaxed) {
+        thread::sleep(Duration::from_millis(120));
+    }
+
+    Ok(())
+}
+
+fn build_mic_test_stream_f32(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    channels: usize,
+    app: AppHandle,
+    err_app: AppHandle,
+) -> Result<cpal::Stream, TranscriptionError> {
+    device
+        .build_input_stream(
+            config,
+            move |data: &[f32], _| {
+                let frame = if channels <= 1 {
+                    data.to_vec()
+                } else {
+                    downmix_to_mono(data, channels)
+                };
+                let (rms, peak) = compute_level_stats(&frame);
+                emit_mic_level(&app, rms, peak, rms > 0.015);
+            },
+            move |err| {
+                let _ = err_app.emit(
+                    "mic-test-error",
+                    ErrorPayload {
+                        message: format!("audio stream error: {err}"),
+                    },
+                );
+            },
+            None,
+        )
+        .map_err(|err| TranscriptionError::AudioStreamStart(err.to_string()))
+}
+
+fn build_mic_test_stream_i16(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    channels: usize,
+    app: AppHandle,
+    err_app: AppHandle,
+) -> Result<cpal::Stream, TranscriptionError> {
+    device
+        .build_input_stream(
+            config,
+            move |data: &[i16], _| {
+                let mut out = Vec::with_capacity(data.len() / channels.max(1));
+                if channels <= 1 {
+                    for sample in data {
+                        out.push(*sample as f32 / i16::MAX as f32);
+                    }
+                } else {
+                    for frame in data.chunks(channels) {
+                        let mut sum = 0.0f32;
+                        for sample in frame {
+                            sum += *sample as f32 / i16::MAX as f32;
+                        }
+                        out.push(sum / channels as f32);
+                    }
+                }
+                let (rms, peak) = compute_level_stats(&out);
+                emit_mic_level(&app, rms, peak, rms > 0.015);
+            },
+            move |err| {
+                let _ = err_app.emit(
+                    "mic-test-error",
+                    ErrorPayload {
+                        message: format!("audio stream error: {err}"),
+                    },
+                );
+            },
+            None,
+        )
+        .map_err(|err| TranscriptionError::AudioStreamStart(err.to_string()))
+}
+
+fn build_mic_test_stream_u16(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    channels: usize,
+    app: AppHandle,
+    err_app: AppHandle,
+) -> Result<cpal::Stream, TranscriptionError> {
+    device
+        .build_input_stream(
+            config,
+            move |data: &[u16], _| {
+                let mut out = Vec::with_capacity(data.len() / channels.max(1));
+                if channels <= 1 {
+                    for sample in data {
+                        out.push((*sample as f32 / u16::MAX as f32) * 2.0 - 1.0);
+                    }
+                } else {
+                    for frame in data.chunks(channels) {
+                        let mut sum = 0.0f32;
+                        for sample in frame {
+                            sum += (*sample as f32 / u16::MAX as f32) * 2.0 - 1.0;
+                        }
+                        out.push(sum / channels as f32);
+                    }
+                }
+                let (rms, peak) = compute_level_stats(&out);
+                emit_mic_level(&app, rms, peak, rms > 0.015);
+            },
+            move |err| {
+                let _ = err_app.emit(
+                    "mic-test-error",
+                    ErrorPayload {
+                        message: format!("audio stream error: {err}"),
+                    },
+                );
+            },
+            None,
+        )
+        .map_err(|err| TranscriptionError::AudioStreamStart(err.to_string()))
+}
+
 fn run_transcription_loop(
     app: AppHandle,
     model_path: PathBuf,
@@ -768,9 +1164,14 @@ fn run_transcription_loop(
     stop_flag: Arc<AtomicBool>,
 ) -> Result<(), TranscriptionError> {
     let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or(TranscriptionError::AudioDeviceUnavailable)?;
+    let (device, _selected_name, did_fallback) =
+        resolve_input_device(&host, config.input_device_key.as_deref())?;
+    if did_fallback {
+        emit_error(
+            &app,
+            "selected microphone was not found; using default input device",
+        );
+    }
 
     let stream_config = device
         .default_input_config()

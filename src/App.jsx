@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 
 const DEFAULT_SOAP_TEMPLATE =
   '';
+const MIC_SELECTION_STORAGE_KEY = 'medscribe.selectedMicDeviceKey';
 
 export default function App() {
   const [patients, setPatients] = useState([]);
@@ -23,6 +24,13 @@ export default function App() {
   const [setupError, setSetupError] = useState('');
   const [modelDownloads, setModelDownloads] = useState({});
   const [modelDeleting, setModelDeleting] = useState({});
+  const [micDevices, setMicDevices] = useState([]);
+  const [micDevicesLoading, setMicDevicesLoading] = useState(true);
+  const [micDevicesError, setMicDevicesError] = useState('');
+  const [selectedMicDeviceKey, setSelectedMicDeviceKey] = useState('');
+  const [micTestRunning, setMicTestRunning] = useState(false);
+  const [micLevel, setMicLevel] = useState(0);
+  const [micDetectedOnce, setMicDetectedOnce] = useState(false);
 
   const currentPatientIdRef = useRef(currentPatientId);
   const lastSavedPatientsJsonRef = useRef('');
@@ -52,6 +60,90 @@ export default function App() {
 
   useEffect(() => {
     refreshSetupStatus();
+  }, []);
+
+  const refreshMicDevices = async () => {
+    if (!isTauri()) {
+      const fallback = [{ key: 'default', name: 'Default input', is_default: true }];
+      setMicDevices(fallback);
+      setSelectedMicDeviceKey('default');
+      setMicDevicesError('');
+      setMicDevicesLoading(false);
+      return;
+    }
+
+    try {
+      setMicDevicesLoading(true);
+      const payload = await invoke('list_input_devices');
+      const devices = Array.isArray(payload?.devices) ? payload.devices : [];
+      const defaultDeviceKey =
+        typeof payload?.default_device_key === 'string' ? payload.default_device_key : '';
+      setMicDevices(devices);
+
+      setSelectedMicDeviceKey((current) => {
+        const availableKeys = new Set(
+          devices.map((device) => (typeof device?.key === 'string' ? device.key : '')).filter(Boolean)
+        );
+        const persisted =
+          typeof window !== 'undefined' ? window.localStorage.getItem(MIC_SELECTION_STORAGE_KEY) : '';
+        const next =
+          (current && availableKeys.has(current) && current) ||
+          (persisted && availableKeys.has(persisted) && persisted) ||
+          (defaultDeviceKey && availableKeys.has(defaultDeviceKey) && defaultDeviceKey) ||
+          (devices[0]?.key || '');
+
+        if (typeof window !== 'undefined') {
+          if (next) {
+            window.localStorage.setItem(MIC_SELECTION_STORAGE_KEY, next);
+          } else {
+            window.localStorage.removeItem(MIC_SELECTION_STORAGE_KEY);
+          }
+        }
+        return next;
+      });
+
+      setMicDevicesError('');
+    } catch (err) {
+      setMicDevicesError(String(err));
+    } finally {
+      setMicDevicesLoading(false);
+    }
+  };
+
+  const startMicTest = async () => {
+    if (!isTauri()) {
+      return;
+    }
+
+    try {
+      setMicDevicesError('');
+      setMicLevel(0);
+      await invoke('start_mic_test', {
+        deviceKey: selectedMicDeviceKey || null
+      });
+      setMicTestRunning(true);
+    } catch (err) {
+      setMicDevicesError(String(err));
+      setMicTestRunning(false);
+    }
+  };
+
+  const stopMicTest = async () => {
+    if (!isTauri()) {
+      return;
+    }
+    try {
+      await invoke('stop_mic_test');
+    } catch (_err) {
+      // no-op
+    } finally {
+      setMicTestRunning(false);
+      setMicLevel(0);
+    }
+  };
+
+  useEffect(() => {
+    refreshMicDevices();
   }, []);
 
   useEffect(() => {
@@ -206,6 +298,33 @@ export default function App() {
       } else {
         unlisteners.push(unlistenProgress);
       }
+
+      const unlistenMicLevel = await listen('mic-test-level', (event) => {
+        const payload = event.payload || {};
+        const rms = Number(payload.rms || 0);
+        const active = Boolean(payload.active);
+        const normalized = Math.min(1, Math.max(0, rms * 12));
+        setMicLevel((prev) => prev * 0.35 + normalized * 0.65);
+        if (active) {
+          setMicDetectedOnce(true);
+        }
+      });
+      if (cancelled) {
+        unlistenMicLevel();
+      } else {
+        unlisteners.push(unlistenMicLevel);
+      }
+
+      const unlistenMicError = await listen('mic-test-error', (event) => {
+        const message = event.payload?.message || 'Microphone test failed';
+        setMicDevicesError(message);
+        setMicTestRunning(false);
+      });
+      if (cancelled) {
+        unlistenMicError();
+      } else {
+        unlisteners.push(unlistenMicError);
+      }
     };
 
     setup();
@@ -221,6 +340,7 @@ export default function App() {
   useEffect(() => {
     return () => {
       if (isTauri()) {
+        invoke('stop_mic_test').catch(() => {});
         invoke('stop_transcription').catch(() => {});
       }
     };
@@ -268,13 +388,17 @@ export default function App() {
     }
 
     try {
+      if (micTestRunning) {
+        await stopMicTest();
+      }
       setIsStartingRecording(true);
       setErrorText('');
       setStatusText('Starting microphone...');
       await invoke('start_transcription', {
         config: {
           vad_sensitivity: Number(vadSensitivity),
-          max_chunk_seconds: 14
+          max_chunk_seconds: 14,
+          input_device_key: selectedMicDeviceKey || null
         }
       });
       setRecording(true);
@@ -428,9 +552,31 @@ export default function App() {
         modelDeleting={modelDeleting}
         onDownloadModel={downloadModel}
         onDeleteModel={deleteModel}
-        onStartUsing={() => setSetupVisible(false)}
+        onStartUsing={async () => {
+          await stopMicTest();
+          setSetupVisible(false);
+        }}
         vadSensitivity={vadSensitivity}
         setVadSensitivity={setVadSensitivity}
+        micDevices={micDevices}
+        micDevicesLoading={micDevicesLoading}
+        micDevicesError={micDevicesError}
+        selectedMicDeviceKey={selectedMicDeviceKey}
+        onSelectMicDevice={(nextKey) => {
+          setSelectedMicDeviceKey(nextKey);
+          if (typeof window !== 'undefined') {
+            if (nextKey) {
+              window.localStorage.setItem(MIC_SELECTION_STORAGE_KEY, nextKey);
+            } else {
+              window.localStorage.removeItem(MIC_SELECTION_STORAGE_KEY);
+            }
+          }
+        }}
+        micTestRunning={micTestRunning}
+        micLevel={micLevel}
+        micDetectedOnce={micDetectedOnce}
+        onRefreshMicDevices={refreshMicDevices}
+        onToggleMicTest={() => (micTestRunning ? stopMicTest() : startMicTest())}
       />
     );
   }
@@ -459,6 +605,7 @@ export default function App() {
             copyMessage={copyMessage}
             onOpenSetup={() => {
               refreshSetupStatus();
+              refreshMicDevices();
               setSetupVisible(true);
             }}
           />
@@ -480,10 +627,29 @@ function StartupSetupScreen({
   onDeleteModel,
   onStartUsing,
   vadSensitivity,
-  setVadSensitivity
+  setVadSensitivity,
+  micDevices,
+  micDevicesLoading,
+  micDevicesError,
+  selectedMicDeviceKey,
+  onSelectMicDevice,
+  micTestRunning,
+  micLevel,
+  micDetectedOnce,
+  onRefreshMicDevices,
+  onToggleMicTest
 }) {
   const models = setupStatus?.models || [];
   const canStart = !!setupStatus?.all_ready;
+  const hasMicOptions = micDevices.length > 0;
+  const meterPercent = `${Math.round(Math.max(0, Math.min(1, micLevel)) * 100)}%`;
+  const micStatusText = micTestRunning
+    ? micDetectedOnce
+      ? 'Input detected'
+      : 'No input detected yet'
+    : micDetectedOnce
+      ? 'Test passed. Microphone input was detected.'
+      : 'Run a quick microphone test before starting.';
 
   return (
     <div className="setup-screen-root">
@@ -496,6 +662,55 @@ function StartupSetupScreen({
         {setupStatus?.models_root && (
           <p className="setup-root-path">Find all app local storage at {setupStatus.models_root}</p>
         )}
+
+        <div className="setup-mic-panel">
+          <div>
+            <h3 className="setup-vad-title">Microphone</h3>
+            <p className="setup-vad-description">
+              Pick the input device used for recording. Use test mode to confirm speech is being captured.
+            </p>
+          </div>
+          <div className="setup-mic-actions">
+            <select
+              id="setup-mic-select"
+              value={selectedMicDeviceKey}
+              onChange={(e) => onSelectMicDevice(e.target.value)}
+              className="setup-mic-select"
+              disabled={micDevicesLoading || !hasMicOptions}
+            >
+              {!hasMicOptions && <option value="">No microphones available</option>}
+              {micDevices.map((device) => (
+                <option key={device.key} value={device.key}>
+                  {device.name}
+                  {device.is_default ? ' (Default)' : ''}
+                </option>
+              ))}
+            </select>
+            <div className="setup-mic-buttons">
+              <button className="setup-mic-refresh-btn" onClick={onRefreshMicDevices}>
+                Refresh
+              </button>
+              <button
+                className="setup-mic-test-btn"
+                onClick={onToggleMicTest}
+                disabled={!hasMicOptions || !selectedMicDeviceKey}
+              >
+                {micTestRunning ? 'Stop test' : 'Test microphone'}
+              </button>
+            </div>
+          </div>
+          <div className="setup-mic-meter-track" role="progressbar" aria-valuemin={0} aria-valuemax={100}>
+            <div className="setup-mic-meter-fill" style={{ width: meterPercent }} />
+          </div>
+          <p className={`setup-mic-status ${micDetectedOnce ? 'ok' : ''}`}>{micStatusText}</p>
+          {micDevicesLoading && <p className="setup-loading">Loading microphones...</p>}
+          {micDevicesError && <p className="setup-error">{micDevicesError}</p>}
+          {!micDetectedOnce && !micTestRunning && (
+            <p className="setup-mic-warning">
+              You can continue without testing, but recording quality may be affected if the wrong device is selected.
+            </p>
+          )}
+        </div>
 
         <div className="setup-vad-panel">
           <div>

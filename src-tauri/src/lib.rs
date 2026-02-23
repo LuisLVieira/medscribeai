@@ -26,6 +26,23 @@ async fn get_model_setup_status(
 }
 
 #[tauri::command]
+async fn list_input_devices(
+    app: tauri::AppHandle,
+) -> Result<transcription::InputDeviceListPayload, String> {
+    transcription::list_input_devices_command(app).await
+}
+
+#[tauri::command]
+async fn start_mic_test(app: tauri::AppHandle, device_key: Option<String>) -> Result<(), String> {
+    transcription::start_mic_test_command(app, device_key).await
+}
+
+#[tauri::command]
+async fn stop_mic_test() -> Result<(), String> {
+    transcription::stop_mic_test_command().await
+}
+
+#[tauri::command]
 async fn download_required_model(app: tauri::AppHandle, model_id: String) -> Result<(), String> {
     transcription::download_required_model_command(app, model_id).await
 }
@@ -67,6 +84,9 @@ pub fn run() {
             stop_transcription,
             generate_soap_note,
             get_model_setup_status,
+            list_input_devices,
+            start_mic_test,
+            stop_mic_test,
             download_required_model,
             delete_required_model,
             load_patients,
