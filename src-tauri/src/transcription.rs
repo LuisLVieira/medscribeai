@@ -30,6 +30,7 @@ const WHISPER_TINY_URL: &str =
     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin";
 const MEDGEMMA_HF_REPO: &str = "unsloth/medgemma-1.5-4b-it-GGUF";
 const MEDGEMMA_HF_FILE: &str = "medgemma-1.5-4b-it-Q4_K_M.gguf";
+const SOAP_DEBUG_SHOW_FULL_MODEL_OUTPUT: bool = false;
 const WHISPER_TINY_REQUIRED_BYTES: u64 = 80 * 1024 * 1024;
 const MEDGEMMA_REQUIRED_BYTES: u64 = 3_500 * 1024 * 1024;
 
@@ -302,7 +303,9 @@ Conversation:\n\
         .arg(prompt)
         .arg("-st")
         .arg("-n")
-        .arg("768")
+        .arg("-1")
+        .arg("-c")
+        .arg("4096")
         .arg("-ngl")
         .arg("0")
         .arg("--temp")
@@ -371,63 +374,34 @@ fn resolve_llm_model_path(app: &AppHandle) -> Result<PathBuf, String> {
 
 fn extract_soap_text(raw: &str) -> String {
     let cleaned = remove_terminal_control_chars(raw);
-    let mut collected: Vec<String> = Vec::new();
-    let mut capturing = false;
-
-    for line in cleaned.lines() {
-        let trimmed = line.trim();
-        if trimmed.eq_ignore_ascii_case("exiting...") {
-            break;
-        }
-        if let Some(header) = soap_header_name(trimmed) {
-            capturing = true;
-            collected.push(format!("{header}:"));
-            continue;
-        }
-        if !capturing {
-            continue;
-        }
-        if trimmed.starts_with("[ Prompt:")
-            || trimmed.starts_with('>')
-            || trimmed.contains("llama_memory_breakdown_print:")
-        {
-            continue;
-        }
-        collected.push(trimmed.to_string());
+    if SOAP_DEBUG_SHOW_FULL_MODEL_OUTPUT {
+        return strip_exiting_token(&cleaned);
     }
 
-    let result = collected
-        .join("\n")
-        .lines()
-        .map(str::trim_end)
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string();
-
-    if !result.is_empty() {
-        return result;
+    let marker = "(truncate)";
+    let marker_alt = "(truncated)";
+    let lower = cleaned.to_ascii_lowercase();
+    if let Some((idx, marker_len)) = lower
+        .rfind(marker)
+        .map(|idx| (idx, marker.len()))
+        .or_else(|| lower.rfind(marker_alt).map(|idx| (idx, marker_alt.len())))
+    {
+        let cut = idx + marker_len;
+        let out = cleaned
+            .get(cut..)
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
+        strip_exiting_token(&out)
+    } else {
+        strip_exiting_token(cleaned.trim())
     }
+}
 
-    // Fallback: return non-empty lines with obvious CLI scaffolding removed.
-    cleaned
+fn strip_exiting_token(input: &str) -> String {
+    input
         .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .filter(|line| {
-            !line.starts_with("Loading model")
-                && !line.starts_with("available commands:")
-                && !line.starts_with("/exit")
-                && !line.starts_with("/regen")
-                && !line.starts_with("/clear")
-                && !line.starts_with("/read")
-                && !line.starts_with("build")
-                && !line.starts_with("model")
-                && !line.starts_with("modalities")
-                && !line.starts_with('>')
-                && !line.eq_ignore_ascii_case("Exiting...")
-                && !line.starts_with("[ Prompt:")
-        })
+        .filter(|line| !line.trim().eq_ignore_ascii_case("exiting..."))
         .collect::<Vec<_>>()
         .join("\n")
         .trim()
@@ -439,22 +413,6 @@ fn remove_terminal_control_chars(input: &str) -> String {
         .chars()
         .filter(|ch| *ch == '\n' || *ch == '\t' || !ch.is_control())
         .collect()
-}
-
-fn soap_header_name(line: &str) -> Option<&'static str> {
-    let normalized = line
-        .trim()
-        .trim_start_matches(|c: char| !c.is_ascii_alphabetic())
-        .trim_end_matches(|c: char| !c.is_ascii_alphabetic())
-        .to_ascii_lowercase();
-
-    match normalized.as_str() {
-        "subjective" => Some("Subjective"),
-        "objective" => Some("Objective"),
-        "assessment" => Some("Assessment"),
-        "plan" => Some("Plan"),
-        _ => None,
-    }
 }
 
 fn get_model_setup_status(app: &AppHandle) -> Result<ModelSetupStatusPayload, TranscriptionError> {

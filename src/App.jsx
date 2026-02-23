@@ -320,7 +320,7 @@ export default function App() {
           patient.id === targetPatientId
             ? {
                 ...patient,
-                soap: formatSoapTextAsHtml(String(soapText || ''))
+                soap: appendSoapHtml(patient.soap, formatSoapTextAsHtml(String(soapText || '')))
               }
             : patient
         )
@@ -709,17 +709,40 @@ function MainContent({
           </div>
         </div>
         <div className="flex-1 overflow-y-auto p-6">
-          <div
-            contentEditable
-            suppressContentEditableWarning
-            onBlur={(e) => onUpdatePatient(patient.id, 'soap', e.currentTarget.innerHTML)}
-            className="prose prose-sm max-w-none outline-none focus:ring-2 focus:ring-blue-200 rounded p-2 min-h-full"
-            dangerouslySetInnerHTML={{ __html: patient.soap }}
-            aria-label="SOAP note editor"
+          <SoapEditor
+            patientId={patient.id}
+            value={patient.soap}
+            onCommit={(html) => onUpdatePatient(patient.id, 'soap', html)}
           />
         </div>
       </div>
     </div>
+  );
+}
+
+function SoapEditor({ patientId, value, onCommit }) {
+  const editorRef = useRef(null);
+
+  useEffect(() => {
+    const el = editorRef.current;
+    if (!el) {
+      return;
+    }
+    const next = String(value || '');
+    if (el.innerHTML !== next) {
+      el.innerHTML = next;
+    }
+  }, [patientId, value]);
+
+  return (
+    <div
+      ref={editorRef}
+      contentEditable
+      suppressContentEditableWarning
+      onBlur={(e) => onCommit(e.currentTarget.innerHTML)}
+      className="prose prose-sm max-w-none outline-none focus:ring-2 focus:ring-blue-200 rounded p-2 min-h-full"
+      aria-label="SOAP note editor"
+    />
   );
 }
 
@@ -820,30 +843,104 @@ function htmlToPlainText(html) {
 }
 
 function formatSoapTextAsHtml(text) {
-  const lines = text.split('\n');
-  const htmlParts = [];
+  return markdownToHtml(text);
+}
 
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
+function appendSoapHtml(existingHtml, newHtml) {
+  const left = String(existingHtml || '').trim();
+  const right = String(newHtml || '').trim();
+  if (!right) {
+    return left;
+  }
+  if (!left) {
+    return right;
+  }
+  return `${left}\n<p></p>\n${right}`;
+}
+
+function markdownToHtml(text) {
+  const lines = String(text || '').replaceAll('\r\n', '\n').split('\n');
+  const html = [];
+  let inUl = false;
+  let inOl = false;
+
+  const closeLists = () => {
+    if (inUl) {
+      html.push('</ul>');
+      inUl = false;
+    }
+    if (inOl) {
+      html.push('</ol>');
+      inOl = false;
+    }
+  };
+
+  for (const raw of lines) {
+    const line = raw.trim();
     if (!line) {
+      closeLists();
       continue;
     }
 
-    const section = line.match(/^(Subjective|Objective|Assessment|Plan)\s*:?\s*$/i);
-    if (section) {
-      const title = section[1].charAt(0).toUpperCase() + section[1].slice(1).toLowerCase();
-      htmlParts.push(`<h3>${escapeHtml(title)}</h3>`);
+    const heading = line.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) {
+      closeLists();
+      const level = Math.min(heading[1].length, 6);
+      html.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
       continue;
     }
 
-    htmlParts.push(`<p>${escapeHtml(line)}</p>`);
+    const ul = line.match(/^[-*+]\s+(.+)$/);
+    if (ul) {
+      if (inOl) {
+        html.push('</ol>');
+        inOl = false;
+      }
+      if (!inUl) {
+        html.push('<ul>');
+        inUl = true;
+      }
+      html.push(`<li>${renderInlineMarkdown(ul[1])}</li>`);
+      continue;
+    }
+
+    const ol = line.match(/^\d+\.\s+(.+)$/);
+    if (ol) {
+      if (inUl) {
+        html.push('</ul>');
+        inUl = false;
+      }
+      if (!inOl) {
+        html.push('<ol>');
+        inOl = true;
+      }
+      html.push(`<li>${renderInlineMarkdown(ol[1])}</li>`);
+      continue;
+    }
+
+    closeLists();
+    const soapHeader = line.match(/^(Subjective|Objective|Assessment|Plan)\s*:?\s*$/i);
+    if (soapHeader) {
+      const title = soapHeader[1].charAt(0).toUpperCase() + soapHeader[1].slice(1).toLowerCase();
+      html.push(`<h3>${escapeHtml(title)}</h3>`);
+      continue;
+    }
+
+    html.push(`<p>${renderInlineMarkdown(line)}</p>`);
   }
 
-  if (htmlParts.length === 0) {
-    return `<p>${escapeHtml(text.trim())}</p>`;
-  }
+  closeLists();
+  const out = html.join('\n').trim();
+  return out || `<p>${escapeHtml(String(text || '').trim())}</p>`;
+}
 
-  return htmlParts.join('\n');
+function renderInlineMarkdown(text) {
+  let out = escapeHtml(String(text || ''));
+  out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
+  out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  out = out.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>');
+  return out;
 }
 
 function escapeHtml(value) {
