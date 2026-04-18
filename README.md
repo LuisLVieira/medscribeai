@@ -2,6 +2,8 @@
 
 MedScribeAI is an experimental Tauri (Rust + React) desktop application that provides near real-time, local CPU medical conversation transcription and summarization into SOAP standard.
 
+https://www.youtube.com/watch?v=CC4VzAdQJSo
+
 ## Quick Start
 
 - Install Rust toolchain (stable) and platform-specific build tools for Tauri.
